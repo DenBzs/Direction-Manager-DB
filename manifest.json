@@ -1,0 +1,11 @@
+{
+    "display_name": "🪄전개지시M",
+    "loading_order": 9,
+    "requires": [],
+    "optional": [],
+    "js": "index.js",
+    "css": "style.css",
+    "author": "DenBzs",
+    "version": "1.0",
+    "homePage": "https://github.com/DenBzs/Direction-Manager-DB"
+}

@@ -1,0 +1,46 @@
+<div class="inline-drawer">
+    <div class="inline-drawer-toggle inline-drawer-header">
+        <b>🪄전개지시M</b>
+        <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
+    </div>
+    <div class="inline-drawer-content">
+        <div class="flex-container flexnowrap">
+            <label class="checkbox_label" for="direction_manager_enabled">
+                <input type="checkbox" id="direction_manager_enabled" class="checkbox">
+                <span>🪄전개지시M 활성화</span>
+            </label>
+        </div>
+        <br>
+        <div class="">
+            <div><label for="direction_prompt_text" class="flex1">Direction 프롬프트</label></div>
+            <textarea id="direction_prompt_text" class="text_pole textarea_compact" rows="8" placeholder="Direction 프롬프트를 입력하세요..."></textarea>
+        </div>
+        <br>
+        <div class="flex-container flexnowrap">
+            <label for="direction_prompt_depth" class="flex1">삽입 위치 (Depth)</label>
+            <input id="direction_prompt_depth" class="text_pole widthUnset" type="number" min="0" max="100" value="1" title="0: Chat History 끝에 삽입, >0: 끝에서부터 N번째 위치에 삽입">
+        </div>
+        <div class="flex-container flexnowrap">
+            <label for="direction_default_scope" class="flex1">팝업 기본 범위</label>
+            <select id="direction_default_scope" class="text_pole widthUnset">
+                <option value="global">전역</option>
+                <option value="char">캐릭터</option>
+                <option value="chat" selected>채팅</option>
+            </select>
+        </div>
+        <div class="flex-container flexnowrap">
+            <button id="direction_reset_prompt" class="menu_button" title="기본 프롬프트로 초기화">
+                <i class="fa-solid fa-refresh"></i>
+                <span>기본값으로 초기화</span>
+            </button>
+            <button id="direction_clear_char" class="menu_button" title="현재 캐릭터 전용 저장 내용 삭제">
+                <i class="fa-solid fa-user-slash"></i>
+                <span>이 캐릭터 데이터 삭제</span>
+            </button>
+            <button id="direction_clear_chat" class="menu_button" title="현재 채팅 전용 저장 내용 삭제">
+                <i class="fa-solid fa-comment-slash"></i>
+                <span>이 채팅 데이터 삭제</span>
+            </button>
+        </div>
+    </div>
+</div>
