@@ -1,6 +1,7 @@
 // 🪄전개지시M 확장 - direction 플레이스홀더 관리 (컴팩트 UI 전용)
 import { extension_settings, getContext } from "../../../extensions.js";
 import { saveSettingsDebounced, eventSource, event_types, characters, this_chid } from "../../../../script.js";
+import { Popup } from "../../../popup.js";
 
 // 확장 설정
 const extensionName = "Direction-Manager-DB";
@@ -61,7 +62,7 @@ let editSessionSnapshot = null;
 
 // 플레이스홀더 정의
 const placeholders = [
-    { key: "direction", name: "{{direction}}", isCustom: true },
+    { key: "direction", name: "🪄전개지시M", isCustom: true },
 ];
 
 // 컴팩트 UI 관련 변수들
@@ -596,7 +597,7 @@ function renderPresetSelect() {
     const presets = getPresetList(placeholder.key, currentScope);
 
     select.empty();
-    select.append('<option value="">선택...</option>');
+    select.append('<option value="">✨️ 어떤 지시를 내릴까?</option>');
 
     presets.forEach((preset) => {
         select.append(`<option value="${preset.id}">${preset.name}</option>`);
@@ -775,7 +776,7 @@ function setupCompactUIEventListeners() {
         const scopedValue = getCurrentScopeState(placeholder.key);
 
         if (!scopedValue.previousContent) {
-            alert("이 범위에 저장된 이전 내용이 없습니다.");
+            toastr.info("이 범위에 저장된 이전 내용이 없습니다.");
             return;
         }
 
@@ -883,18 +884,43 @@ function setupCompactUIEventListeners() {
         compactUIPopup.find(".dm-compact--textarea").val(selectedPreset.content).trigger("input");
     });
 
-    compactUIPopup.find(".dm-compact--preset-save").on("click", () => {
+    compactUIPopup.find(".dm-compact--preset-save").on("click", async () => {
         const placeholder = getPopupCurrentPlaceholder();
         const textareaValue = String(compactUIPopup.find(".dm-compact--textarea").val() || "");
-        const name = prompt("프리셋 이름을 입력하세요:", "새 프리셋");
+        const select = compactUIPopup.find(".dm-compact--preset-select");
+        const selectedPresetId = String(select.val() || "");
+
+        const settings = getSettings();
+        settings.presets = sanitizePresets(settings.presets);
+        const presets = settings.presets[placeholder.key][currentScope];
+        const selectedPreset = selectedPresetId ? presets.find((preset) => preset.id === selectedPresetId) : null;
+
+        // 이미 선택된 프리셋이 있으면 새로 저장할지, 그 프리셋을 덮어쓸지 먼저 확인
+        // (ST 자체 Popup 사용: 네이티브 confirm()은 모바일에서 키보드가 열렸다 닫히는 듯한 리플로우를 유발함)
+        if (selectedPreset) {
+            const overwrite = await Popup.show.confirm(
+                "프리셋 덮어쓰기",
+                `선택된 프리셋 "${selectedPreset.name}"을(를) 지금 내용으로 덮어쓸까요?<br>(취소를 누르면 새 프리셋으로 저장합니다)`
+            );
+
+            if (overwrite) {
+                selectedPreset.content = textareaValue;
+                saveSettingsDebounced();
+                renderPresetSelect();
+                compactUIPopup.find(`.dm-compact--preset-select option[value="${selectedPreset.id}"]`).prop("selected", true);
+                compactUIPopup.find(".dm-compact--preset-rename").prop("disabled", false);
+                compactUIPopup.find(".dm-compact--preset-delete").prop("disabled", false);
+                return;
+            }
+        }
+
+        const name = await Popup.show.input("새 프리셋", "새 프리셋 이름을 입력하세요:", "새 프리셋");
 
         if (!name || !name.trim()) {
             return;
         }
 
-        const settings = getSettings();
-        settings.presets = sanitizePresets(settings.presets);
-        settings.presets[placeholder.key][currentScope].push({
+        presets.push({
             id: generatePresetId(),
             name: name.trim(),
             content: textareaValue,
@@ -904,7 +930,7 @@ function setupCompactUIEventListeners() {
         renderPresetSelect();
     });
 
-    compactUIPopup.find(".dm-compact--preset-rename").on("click", () => {
+    compactUIPopup.find(".dm-compact--preset-rename").on("click", async () => {
         const placeholder = getPopupCurrentPlaceholder();
         const select = compactUIPopup.find(".dm-compact--preset-select");
         const presetId = String(select.val() || "");
@@ -920,7 +946,7 @@ function setupCompactUIEventListeners() {
             return;
         }
 
-        const newName = prompt("새 프리셋 이름을 입력하세요:", target.name);
+        const newName = await Popup.show.input("프리셋 이름 변경", "새 프리셋 이름을 입력하세요:", target.name);
 
         if (!newName || !newName.trim()) {
             return;
@@ -937,7 +963,7 @@ function setupCompactUIEventListeners() {
         compactUIPopup.find(".dm-compact--preset-delete").prop("disabled", false);
     });
 
-    compactUIPopup.find(".dm-compact--preset-delete").on("click", () => {
+    compactUIPopup.find(".dm-compact--preset-delete").on("click", async () => {
         const placeholder = getPopupCurrentPlaceholder();
         const select = compactUIPopup.find(".dm-compact--preset-select");
         const presetId = String(select.val() || "");
@@ -946,7 +972,7 @@ function setupCompactUIEventListeners() {
             return;
         }
 
-        const confirmed = confirm("선택한 프리셋을 삭제하시겠습니까?");
+        const confirmed = await Popup.show.confirm("프리셋 삭제", "선택한 프리셋을 삭제하시겠습니까?");
 
         if (!confirmed) {
             return;
@@ -1049,15 +1075,15 @@ function updateExtensionMenuUI() {
     $("#direction_default_scope").val(settings.defaultScope || "chat");
 }
 
-function clearCurrentCharScopeData() {
+async function clearCurrentCharScopeData() {
     const key = getCurrentCharKey();
 
     if (!key) {
-        alert("현재 캐릭터를 찾을 수 없습니다.");
+        toastr.warning("현재 캐릭터를 찾을 수 없습니다.");
         return;
     }
 
-    const confirmed = confirm("현재 캐릭터 전용 저장 내용을 삭제하시겠습니까?");
+    const confirmed = await Popup.show.confirm("캐릭터 데이터 삭제", "현재 캐릭터 전용 저장 내용을 삭제하시겠습니까?");
 
     if (!confirmed) {
         return;
@@ -1070,15 +1096,15 @@ function clearCurrentCharScopeData() {
     refreshPopupIfOpened();
 }
 
-function clearCurrentChatScopeData() {
+async function clearCurrentChatScopeData() {
     const key = getCurrentChatKey();
 
     if (!key) {
-        alert("현재 채팅을 찾을 수 없습니다.");
+        toastr.warning("현재 채팅을 찾을 수 없습니다.");
         return;
     }
 
-    const confirmed = confirm("현재 채팅 전용 저장 내용을 삭제하시겠습니까?");
+    const confirmed = await Popup.show.confirm("채팅 데이터 삭제", "현재 채팅 전용 저장 내용을 삭제하시겠습니까?");
 
     if (!confirmed) {
         return;
