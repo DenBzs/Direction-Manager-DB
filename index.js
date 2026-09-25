@@ -70,7 +70,6 @@ const placeholders = [
 ];
 
 // 컴팩트 UI 관련 변수들
-let compactUIAnchor = null; // 버튼을 감싸는 위치 기준 래퍼 (팝업이 다른 확장 버튼들 사이로 끼어들며 순서가 밀리는 것 방지)
 let compactUIButton = null;
 let compactUIPopup = null;
 
@@ -781,9 +780,7 @@ function showCompactUIPopup() {
     `;
 
     compactUIPopup = $(popupHtml);
-    // 버튼이 속한 확장 버튼 줄(#nonQRFormItems)에 직접 끼워 넣으면 그 줄의
-    // flex 순서가 흐트러지므로, 버튼 전용 래퍼(dm-compact--anchor) 안에만 넣는다.
-    compactUIAnchor.append(compactUIPopup);
+    $("#nonQRFormItems").append(compactUIPopup);
 
     // 애니메이션
     setTimeout(() => {
@@ -1062,31 +1059,27 @@ function addCompactUIButton() {
     }
 
     // 기존 버튼 제거
-    if (compactUIAnchor) {
-        compactUIAnchor.remove();
-        compactUIAnchor = null;
+    if (compactUIButton) {
+        compactUIButton.remove();
         compactUIButton = null;
     }
 
-    const anchorHtml = `
-        <div class="dm-compact--anchor">
-            <div class="dm-compact--button menu_button" title="🪄전개지시M 빠른 편집">
-                <i class="fa-solid fa-feather"></i>
-            </div>
+    const buttonHtml = `
+        <div class="dm-compact--button menu_button" title="🪄전개지시M 빠른 편집">
+            <i class="fa-solid fa-feather"></i>
         </div>
     `;
 
-    compactUIAnchor = $(anchorHtml);
-    compactUIButton = compactUIAnchor.find(".dm-compact--button");
-    $(ta).after(compactUIAnchor);
+    compactUIButton = $(buttonHtml);
+    $(ta).after(compactUIButton);
 
     // 확장 활성화 상태에 따라 버튼 표시/숨김
     const settings = getSettings();
 
     if (settings && settings.extensionEnabled) {
-        compactUIAnchor.show();
+        compactUIButton.show();
     } else {
-        compactUIAnchor.hide();
+        compactUIButton.hide();
     }
 
     // 클릭 이벤트
@@ -1180,15 +1173,15 @@ function setupExtensionMenuEventHandlers() {
 
         if (isEnabled) {
             // 확장 활성화 시: 컴팩트 UI 버튼 표시 및 모든 플레이스홀더 적용
-            if (compactUIAnchor) {
-                compactUIAnchor.show();
+            if (compactUIButton) {
+                compactUIButton.show();
             }
 
             applyAllPlaceholders();
         } else {
             // 확장 비활성화 시: 컴팩트 UI 버튼 숨김 및 모든 매크로 제거
-            if (compactUIAnchor) {
-                compactUIAnchor.hide();
+            if (compactUIButton) {
+                compactUIButton.hide();
 
                 // 팝업이 열려있으면 닫기
                 if (compactUIPopup) {
