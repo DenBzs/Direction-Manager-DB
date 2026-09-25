@@ -52,6 +52,7 @@ const defaultSettings = {
     directionPrompt: DEFAULT_DIRECTION_PROMPT,
     promptDepth: 1, // 0: Chat History 끝에 삽입, >0: 끝에서부터 N번째 위치에 삽입
     defaultScope: "chat",
+    lastScope: "chat",
     _migratedV2: false,
     _migratedV3: false,
 };
@@ -59,6 +60,9 @@ const defaultSettings = {
 let currentScope = "chat";
 // 현재 범위+플레이스홀더를 팝업에 불러온 시점의 content (이전 내용 추적용)
 let editSessionSnapshot = null;
+// ST 네이티브 Popup(확인/입력창)이 떠 있는 동안 true. 이 동안에는
+// "바깥 클릭시 팝업 닫기" 핸들러가 컴팩트 UI를 닫지 않도록 막는다.
+let isNativePopupOpen = false;
 
 // 플레이스홀더 정의
 const placeholders = [
@@ -66,6 +70,7 @@ const placeholders = [
 ];
 
 // 컴팩트 UI 관련 변수들
+let compactUIAnchor = null; // 버튼을 감싸는 위치 기준 래퍼 (팝업이 다른 확장 버튼들 사이로 끼어들며 순서가 밀리는 것 방지)
 let compactUIButton = null;
 let compactUIPopup = null;
 
@@ -273,6 +278,7 @@ function normalizeSettings() {
     settings.directionPrompt = typeof settings.directionPrompt === "string" ? settings.directionPrompt : defaultSettings.directionPrompt;
     settings.promptDepth = Number.isInteger(settings.promptDepth) ? settings.promptDepth : defaultSettings.promptDepth;
     settings.defaultScope = ["global", "char", "chat"].includes(settings.defaultScope) ? settings.defaultScope : defaultSettings.defaultScope;
+    settings.lastScope = ["global", "char", "chat"].includes(settings.lastScope) ? settings.lastScope : settings.defaultScope;
     settings._migratedV2 = Boolean(settings._migratedV2);
     settings._migratedV3 = Boolean(settings._migratedV3);
 
@@ -595,16 +601,28 @@ function renderPresetSelect() {
     const placeholder = getPopupCurrentPlaceholder();
     const select = compactUIPopup.find(".dm-compact--preset-select");
     const presets = getPresetList(placeholder.key, currentScope);
+    // 현재 범위에 적용되어 있는 내용과 똑같은 프리셋이 있으면
+    // (재적용/재접속 시에도) 그 프리셋이 선택된 상태로 보여준다.
+    const currentContent = getCurrentScopeState(placeholder.key).content;
 
     select.empty();
     select.append('<option value="">✨️ 어떤 지시를 내릴까?</option>');
 
+    let matchedId = "";
+
     presets.forEach((preset) => {
-        select.append(`<option value="${preset.id}">${preset.name}</option>`);
+        select.append(`<option value="${preset.id}">${escapeHtml(preset.name)}</option>`);
+
+        if (!matchedId && currentContent && preset.content === currentContent) {
+            matchedId = preset.id;
+        }
     });
 
-    compactUIPopup.find(".dm-compact--preset-rename").prop("disabled", true);
-    compactUIPopup.find(".dm-compact--preset-delete").prop("disabled", true);
+    select.val(matchedId);
+
+    const hasSelection = Boolean(matchedId);
+    compactUIPopup.find(".dm-compact--preset-rename").prop("disabled", !hasSelection);
+    compactUIPopup.find(".dm-compact--preset-delete").prop("disabled", !hasSelection);
 }
 
 function updateAppliedIndicator() {
@@ -652,6 +670,28 @@ function generatePresetId() {
     return `${Date.now()}-${Math.random()}`;
 }
 
+// ST 네이티브 확인창을 띄우는 동안 isNativePopupOpen을 true로 유지한다.
+// (바깥 클릭시 컴팩트 UI가 같이 닫히는 문제 방지)
+async function showNativeConfirm(header, text, popupOptions = {}) {
+    isNativePopupOpen = true;
+
+    try {
+        return await Popup.show.confirm(header, text, popupOptions);
+    } finally {
+        isNativePopupOpen = false;
+    }
+}
+
+async function showNativeInput(header, text, defaultValue = "", popupOptions = {}) {
+    isNativePopupOpen = true;
+
+    try {
+        return await Popup.show.input(header, text, defaultValue, popupOptions);
+    } finally {
+        isNativePopupOpen = false;
+    }
+}
+
 function escapeHtml(value) {
     return String(value)
         .replace(/&/g, "&amp;")
@@ -688,7 +728,8 @@ function showCompactUIPopup() {
     }
 
     const settings = getSettings();
-    currentScope = settings.defaultScope;
+    // 마지막으로 보고 있던 범위 탭을 그대로 복원 (없으면 기본 범위)
+    currentScope = settings.lastScope || settings.defaultScope;
     ensureUsableCurrentScope();
 
     compactUIButton.addClass("dm-compact--hasPopup");
@@ -740,7 +781,9 @@ function showCompactUIPopup() {
     `;
 
     compactUIPopup = $(popupHtml);
-    $("#nonQRFormItems").append(compactUIPopup);
+    // 버튼이 속한 확장 버튼 줄(#nonQRFormItems)에 직접 끼워 넣으면 그 줄의
+    // flex 순서가 흐트러지므로, 버튼 전용 래퍼(dm-compact--anchor) 안에만 넣는다.
+    compactUIAnchor.append(compactUIPopup);
 
     // 애니메이션
     setTimeout(() => {
@@ -767,6 +810,8 @@ function setupCompactUIEventListeners() {
         }
 
         currentScope = nextScope;
+        getSettings().lastScope = nextScope;
+        saveSettingsDebounced();
         syncPopupByCurrentState();
     });
 
@@ -898,9 +943,10 @@ function setupCompactUIEventListeners() {
         // 이미 선택된 프리셋이 있으면 새로 저장할지, 그 프리셋을 덮어쓸지 먼저 확인
         // (ST 자체 Popup 사용: 네이티브 confirm()은 모바일에서 키보드가 열렸다 닫히는 듯한 리플로우를 유발함)
         if (selectedPreset) {
-            const overwrite = await Popup.show.confirm(
+            const overwrite = await showNativeConfirm(
                 "프리셋 덮어쓰기",
-                `선택된 프리셋 "${selectedPreset.name}"을(를) 지금 내용으로 덮어쓸까요?<br>(취소를 누르면 새 프리셋으로 저장합니다)`
+                `선택된 프리셋 "${selectedPreset.name}"을(를) 지금 내용으로 덮어쓸까요?`,
+                { okButton: "덮어쓰기", cancelButton: "새 프리셋 저장" }
             );
 
             if (overwrite) {
@@ -914,7 +960,7 @@ function setupCompactUIEventListeners() {
             }
         }
 
-        const name = await Popup.show.input("새 프리셋", "새 프리셋 이름을 입력하세요:", "새 프리셋");
+        const name = await showNativeInput("새 프리셋", "새 프리셋 이름을 입력하세요:", "새 프리셋");
 
         if (!name || !name.trim()) {
             return;
@@ -946,7 +992,7 @@ function setupCompactUIEventListeners() {
             return;
         }
 
-        const newName = await Popup.show.input("프리셋 이름 변경", "새 프리셋 이름을 입력하세요:", target.name);
+        const newName = await showNativeInput("프리셋 이름 변경", "새 프리셋 이름을 입력하세요:", target.name);
 
         if (!newName || !newName.trim()) {
             return;
@@ -972,7 +1018,7 @@ function setupCompactUIEventListeners() {
             return;
         }
 
-        const confirmed = await Popup.show.confirm("프리셋 삭제", "선택한 프리셋을 삭제하시겠습니까?");
+        const confirmed = await showNativeConfirm("프리셋 삭제", "선택한 프리셋을 삭제하시겠습니까?");
 
         if (!confirmed) {
             return;
@@ -986,8 +1032,12 @@ function setupCompactUIEventListeners() {
         renderPresetSelect();
     });
 
-    // 외부 클릭시 닫기
+    // 외부 클릭시 닫기 (단, ST 네이티브 확인/입력창이 떠 있는 동안은 무시)
     $(document).on("click.compactUI", (e) => {
+        if (isNativePopupOpen) {
+            return;
+        }
+
         if (!$(e.target).closest(".dm-compact--popup, .dm-compact--button").length) {
             closeCompactUIPopup();
         }
@@ -1012,27 +1062,31 @@ function addCompactUIButton() {
     }
 
     // 기존 버튼 제거
-    if (compactUIButton) {
-        compactUIButton.remove();
+    if (compactUIAnchor) {
+        compactUIAnchor.remove();
+        compactUIAnchor = null;
         compactUIButton = null;
     }
 
-    const buttonHtml = `
-        <div class="dm-compact--button menu_button" title="🪄전개지시M 빠른 편집">
-            <i class="fa-solid fa-feather"></i>
+    const anchorHtml = `
+        <div class="dm-compact--anchor">
+            <div class="dm-compact--button menu_button" title="🪄전개지시M 빠른 편집">
+                <i class="fa-solid fa-feather"></i>
+            </div>
         </div>
     `;
 
-    compactUIButton = $(buttonHtml);
-    $(ta).after(compactUIButton);
+    compactUIAnchor = $(anchorHtml);
+    compactUIButton = compactUIAnchor.find(".dm-compact--button");
+    $(ta).after(compactUIAnchor);
 
     // 확장 활성화 상태에 따라 버튼 표시/숨김
     const settings = getSettings();
 
     if (settings && settings.extensionEnabled) {
-        compactUIButton.show();
+        compactUIAnchor.show();
     } else {
-        compactUIButton.hide();
+        compactUIAnchor.hide();
     }
 
     // 클릭 이벤트
@@ -1083,7 +1137,7 @@ async function clearCurrentCharScopeData() {
         return;
     }
 
-    const confirmed = await Popup.show.confirm("캐릭터 데이터 삭제", "현재 캐릭터 전용 저장 내용을 삭제하시겠습니까?");
+    const confirmed = await showNativeConfirm("캐릭터 데이터 삭제", "현재 캐릭터 전용 저장 내용을 삭제하시겠습니까?");
 
     if (!confirmed) {
         return;
@@ -1104,7 +1158,7 @@ async function clearCurrentChatScopeData() {
         return;
     }
 
-    const confirmed = await Popup.show.confirm("채팅 데이터 삭제", "현재 채팅 전용 저장 내용을 삭제하시겠습니까?");
+    const confirmed = await showNativeConfirm("채팅 데이터 삭제", "현재 채팅 전용 저장 내용을 삭제하시겠습니까?");
 
     if (!confirmed) {
         return;
@@ -1126,15 +1180,15 @@ function setupExtensionMenuEventHandlers() {
 
         if (isEnabled) {
             // 확장 활성화 시: 컴팩트 UI 버튼 표시 및 모든 플레이스홀더 적용
-            if (compactUIButton) {
-                compactUIButton.show();
+            if (compactUIAnchor) {
+                compactUIAnchor.show();
             }
 
             applyAllPlaceholders();
         } else {
             // 확장 비활성화 시: 컴팩트 UI 버튼 숨김 및 모든 매크로 제거
-            if (compactUIButton) {
-                compactUIButton.hide();
+            if (compactUIAnchor) {
+                compactUIAnchor.hide();
 
                 // 팝업이 열려있으면 닫기
                 if (compactUIPopup) {
