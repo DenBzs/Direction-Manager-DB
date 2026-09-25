@@ -1,8 +1,16 @@
 /* Direction-Manager 확장 스타일 - direction 전용 컴팩트 UI */
 
+/* 버튼 위치 기준 래퍼: 팝업은 이 안에만 붙기 때문에 옆 버튼들(연필 등)이 속한
+   줄의 flex 순서에는 영향을 주지 않는다 (팝업 열 때 버튼이 밀리는 문제 방지) */
+.dm-compact--anchor {
+    order: 3;
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+}
+
 /* 컴팩트 UI 버튼 스타일 */
 .dm-compact--button {
-    order: 3;
     display: flex;
     align-items: center;
     height: auto;
