@@ -8,4 +8,5 @@
     "author": "custom",
     "version": "1.0",
     "homePage": "https://github.com/DenBzs/Direction-Manager-DB"
+    "auto_update": false
 }
