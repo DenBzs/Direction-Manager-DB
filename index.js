@@ -63,6 +63,9 @@ let editSessionSnapshot = null;
 // ST 네이티브 Popup(확인/입력창)이 떠 있는 동안 true. 이 동안에는
 // "바깥 클릭시 팝업 닫기" 핸들러가 컴팩트 UI를 닫지 않도록 막는다.
 let isNativePopupOpen = false;
+// 타이핑 중 매 키 입력마다 매크로를 재등록하면(registerMacro) 버벅일 수 있어서,
+// 입력이 잠시 멈췄을 때 한 번만 실제로 반영되도록 디바운스한다.
+let compactUIApplyDebounceTimer = null;
 
 // 플레이스홀더 정의
 const placeholders = [
@@ -448,6 +451,14 @@ function resolveCombinedContent(placeholderKey) {
 }
 
 // 플레이스홀더를 시스템에 적용
+// 대기 중인 디바운스를 취소하고, 지금 즉시 시스템(매크로)에 반영 + 표시 갱신
+function commitDirectionContentNow(placeholder) {
+    clearTimeout(compactUIApplyDebounceTimer);
+    compactUIApplyDebounceTimer = null;
+    applyPlaceholderToSystem(placeholder);
+    updateAppliedIndicator();
+}
+
 function applyPlaceholderToSystem(placeholder) {
     const combined = resolveCombinedContent(placeholder.key);
 
@@ -702,6 +713,11 @@ function escapeHtml(value) {
 
 // 컴팩트 UI 팝업 닫기
 function closeCompactUIPopup() {
+    // 팝업을 닫는 시점에 아직 반영 안 된(디바운스 대기중인) 입력이 있으면 지금 바로 반영
+    if (compactUIApplyDebounceTimer) {
+        commitDirectionContentNow(getPopupCurrentPlaceholder());
+    }
+
     if (compactUIPopup) {
         compactUIPopup.removeClass("dm-compact--active");
 
@@ -904,9 +920,14 @@ function setupCompactUIEventListeners() {
             return;
         }
 
-        applyPlaceholderToSystem(currentPlaceholder);
+        // registerMacro/unregisterMacro는 비용이 있는 작업이라 매 키 입력마다 실행하면
+        // (특히 모바일에서) 타이핑이 버벅일 수 있다. 입력이 250ms 멈췄을 때만 반영한다.
+        clearTimeout(compactUIApplyDebounceTimer);
+        compactUIApplyDebounceTimer = setTimeout(() => {
+            commitDirectionContentNow(currentPlaceholder);
+        }, 250);
+
         saveSettingsDebounced();
-        updateAppliedIndicator();
     });
 
     compactUIPopup.find(".dm-compact--preset-select").on("change", function () {
@@ -924,6 +945,8 @@ function setupCompactUIEventListeners() {
         }
 
         compactUIPopup.find(".dm-compact--textarea").val(selectedPreset.content).trigger("input");
+        // 프리셋 선택은 타이핑이 아니라 즉시 반영되어야 자연스러우므로 디바운스를 건너뛴다.
+        commitDirectionContentNow(getPopupCurrentPlaceholder());
     });
 
     compactUIPopup.find(".dm-compact--preset-save").on("click", async () => {
