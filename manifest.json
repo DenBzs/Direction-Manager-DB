@@ -5,7 +5,7 @@
     "optional": [],
     "js": "index.js",
     "css": "style.css",
-    "author": [],
+    "author": "custom",
     "version": "1.0",
     "homePage": "https://github.com/DenBzs/Direction-Manager-DB"
 }
