@@ -12,21 +12,26 @@
         </div>
         <br>
         <div class="">
-            <div><label for="direction_prompt_text" class="flex1">Direction 프롬프트</label></div>
+            <div><label class="flex1">Direction 프롬프트 (범위별로 따로 저장됩니다)</label></div>
+            <div class="flex-container flexnowrap dm-prompt-tabs" style="gap:6px; margin: 4px 0;">
+                <button type="button" class="menu_button dm-prompt-tab-btn" data-scope="global">전역</button>
+                <button type="button" class="menu_button dm-prompt-tab-btn" data-scope="char">캐릭터</button>
+                <button type="button" class="menu_button dm-prompt-tab-btn" data-scope="chat">채팅</button>
+            </div>
             <textarea id="direction_prompt_text" class="text_pole textarea_compact" rows="8" placeholder="Direction 프롬프트를 입력하세요..."></textarea>
         </div>
         <br>
         <div class="flex-container flexnowrap">
-            <label for="direction_prompt_depth" class="flex1">삽입 위치 (Depth)</label>
-            <input id="direction_prompt_depth" class="text_pole widthUnset" type="number" min="0" max="100" value="1" title="0: Chat History 끝에 삽입, >0: 끝에서부터 N번째 위치에 삽입">
+            <label for="direction_prompt_depth_global" class="flex1">전역 삽입 위치 (Depth)</label>
+            <input id="direction_prompt_depth_global" class="text_pole widthUnset" type="number" min="0" max="100" value="1" title="0: Chat History 끝에 삽입, >0: 끝에서부터 N번째 위치에 삽입">
         </div>
         <div class="flex-container flexnowrap">
-            <label for="direction_default_scope" class="flex1">팝업 기본 범위</label>
-            <select id="direction_default_scope" class="text_pole widthUnset">
-                <option value="global">전역</option>
-                <option value="char">캐릭터</option>
-                <option value="chat" selected>채팅</option>
-            </select>
+            <label for="direction_prompt_depth_char" class="flex1">캐릭터 삽입 위치 (Depth)</label>
+            <input id="direction_prompt_depth_char" class="text_pole widthUnset" type="number" min="0" max="100" value="1" title="0: Chat History 끝에 삽입, >0: 끝에서부터 N번째 위치에 삽입">
+        </div>
+        <div class="flex-container flexnowrap">
+            <label for="direction_prompt_depth_chat" class="flex1">채팅 삽입 위치 (Depth)</label>
+            <input id="direction_prompt_depth_chat" class="text_pole widthUnset" type="number" min="0" max="100" value="1" title="0: Chat History 끝에 삽입, >0: 끝에서부터 N번째 위치에 삽입">
         </div>
         <div class="flex-container flexnowrap">
             <button id="direction_reset_prompt" class="menu_button" title="기본 프롬프트로 초기화">
