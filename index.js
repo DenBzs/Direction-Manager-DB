@@ -7,14 +7,40 @@ import { Popup } from "../../../popup.js";
 const extensionName = "Direction-Manager-DB";
 const LOG_PREFIX = "[🪄전개지시M]";
 
-// 기본 Direction 프롬프트
-const DEFAULT_DIRECTION_PROMPT = `<direction>
+// 기본 Direction 프롬프트 (범위별로 따로 관리)
+// - 채팅: 예전부터 쓰던 "다음 채팅에 반영할 지시" 문구를 그대로 유지
+// - 전역/캐릭터: 채팅용 문구의 핵심 지침(직접 인용하지 말고 자연스럽게 녹여낼 것)을
+//   각자의 목적에 맞게 반영해서 새로 작성
+const DEFAULT_DIRECTION_PROMPT_CHAT = `<direction>
 - Resume the story based on the director's instructions below.
 - The director only provides drafts; refine them into natural prose instead of directly quoting the sentences.
 - Creatively construct and fill in any parts lacking persuasive causality so that the narrative suggested by the director unfolds smoothly.
 
 [Direction(If blank, develop the story as you see fit): {{direction}}]
 </direction>`;
+
+const DEFAULT_DIRECTION_PROMPT_GLOBAL = `<format_rules>
+- These are standing formatting/style rules for every reply in this roleplay. Follow them exactly, without exception, for as long as they are enabled below.
+- Do not quote or restate these rules in your reply; just apply them silently.
+
+{{direction}}
+</format_rules>`;
+
+const DEFAULT_DIRECTION_PROMPT_CHAR = `<character_notes>
+- The following are ongoing notes about the current situation, emotions, personality, or world details that apply to this conversation for the next several turns.
+- Treat them as established fact and weave them naturally into the story; do not quote them directly or announce that you received notes.
+
+{{direction}}
+</character_notes>`;
+
+// 구버전(v4 이전) 호환용 별칭: 그때는 프롬프트가 하나였고, 그 기본값이 지금의 "채팅" 기본값과 같다.
+const DEFAULT_DIRECTION_PROMPT = DEFAULT_DIRECTION_PROMPT_CHAT;
+
+const DEFAULT_DIRECTION_PROMPTS = {
+    global: DEFAULT_DIRECTION_PROMPT_GLOBAL,
+    char: DEFAULT_DIRECTION_PROMPT_CHAR,
+    chat: DEFAULT_DIRECTION_PROMPT_CHAT,
+};
 
 function defaultPlaceholderState() {
     return {
@@ -24,7 +50,7 @@ function defaultPlaceholderState() {
     };
 }
 
-// 범위별 프롬프트 라벨 (AI가 성격이 다른 지시임을 구분하도록)
+// 범위별 프롬프트 라벨 (합쳐진 {{direction}} 매크로 등에서 AI가 성격이 다른 지시임을 구분하도록)
 const SCOPE_LABELS = {
     global: "[Format Rules]",
     char: "[Character Notes]",
@@ -49,15 +75,28 @@ const defaultSettings = {
     },
     // 확장 메뉴 설정
     extensionEnabled: true,
-    directionPrompt: DEFAULT_DIRECTION_PROMPT,
-    promptDepth: 1, // 0: Chat History 끝에 삽입, >0: 끝에서부터 N번째 위치에 삽입
-    defaultScope: "chat",
+    // 범위(전역/캐릭터/채팅)별로 완전히 다른 프롬프트 템플릿을 따로 쓴다.
+    directionPrompt: { ...DEFAULT_DIRECTION_PROMPTS },
+    // 범위별로 서로 다른 삽입 위치(Depth)를 쓸 수 있다.
+    // 0: Chat History 끝에 삽입, >0: 끝에서부터 N번째 위치에 삽입
+    promptDepth: { global: 1, char: 1, chat: 1 },
+    // 팝업을 열 때 마지막으로 봤던 범위 탭을 기억해서 그대로 복원한다.
     lastScope: "chat",
     _migratedV2: false,
     _migratedV3: false,
+    _migratedV4: false,
+    _migratedV5: false,
 };
 
+
 let currentScope = "chat";
+// 입력칸(textarea)을 드래그로 리사이즈했을 때, 전역/캐릭터는 높이를 공유하고
+// 채팅만 따로 기억하기 위한 그룹 저장소. 드래그 리사이즈는 별도 이벤트가 없으므로
+// 스코프를 전환하는 시점에 현재 높이를 읽어서 그룹별로 저장/복원한다.
+function textareaHeightGroup(scope) {
+    return scope === "chat" ? "chat" : "shared";
+}
+let compactUITextareaHeights = { shared: "", chat: "" };
 // 현재 범위+플레이스홀더를 팝업에 불러온 시점의 content (이전 내용 추적용)
 let editSessionSnapshot = null;
 // ST 네이티브 Popup(확인/입력창)이 떠 있는 동안 true. 이 동안에는
@@ -66,6 +105,8 @@ let isNativePopupOpen = false;
 // 타이핑 중 매 키 입력마다 매크로를 재등록하면(registerMacro) 버벅일 수 있어서,
 // 입력이 잠시 멈췄을 때 한 번만 실제로 반영되도록 디바운스한다.
 let compactUIApplyDebounceTimer = null;
+// 확장 설정 패널에서 지금 편집 중인 프롬프트 탭 (전역/캐릭터/채팅)
+let promptEditorScope = "global";
 
 // 플레이스홀더 정의
 const placeholders = [
@@ -179,11 +220,44 @@ function pruneRemovedPlaceholders() {
     return changed;
 }
 
+// 구버전엔 promptDepth가 숫자 하나였음 -> 전역/캐릭터/채팅 세 범위 모두에 그 값을 복사
+function normalizePromptDepth(raw) {
+    if (Number.isInteger(raw)) {
+        return { global: raw, char: raw, chat: raw };
+    }
+
+    const src = raw && typeof raw === "object" ? raw : {};
+
+    return {
+        global: Number.isInteger(src.global) ? src.global : 1,
+        char: Number.isInteger(src.char) ? src.char : 1,
+        chat: Number.isInteger(src.chat) ? src.chat : 1,
+    };
+}
+
+function getScopeDepth(scope) {
+    const depth = getSettings().promptDepth;
+    return Number.isInteger(depth?.[scope]) ? depth[scope] : 1;
+}
+
+// directionPrompt는 이제 범위별(전역/캐릭터/채팅) 템플릿 객체다. 값이 없거나 잘못돼 있으면
+// 그 범위의 기본 템플릿으로 채운다.
+function normalizeDirectionPromptObject(raw) {
+    const src = raw && typeof raw === "object" ? raw : {};
+
+    return {
+        global: typeof src.global === "string" ? src.global : DEFAULT_DIRECTION_PROMPTS.global,
+        char: typeof src.char === "string" ? src.char : DEFAULT_DIRECTION_PROMPTS.char,
+        chat: typeof src.chat === "string" ? src.chat : DEFAULT_DIRECTION_PROMPTS.chat,
+    };
+}
+
 function isGroupContext(context) {
     return Boolean(context?.groupId ?? context?.selected_group ?? context?.group?.id ?? context?.is_group);
 }
 
-function getCurrentCharKey() {
+// 캐릭터 카드 자체를 가리키는 원시 키 (아바타 파일명). "채팅 단위" 키를 만들 때 내부적으로만 사용한다.
+function getCharAvatarKey() {
     const context = getContext();
 
     if (isGroupContext(context)) {
@@ -195,6 +269,13 @@ function getCurrentCharKey() {
     }
 
     return null;
+}
+
+// "캐릭터" 범위는 캐릭터 전체가 아니라, 채팅(chat) 범위처럼 지금 열려 있는
+// 채팅방 안에서만 적용되어야 한다. 그래서 저장 키도 채팅 키와 동일하게 맞춘다.
+// (저장소는 chars / chats 로 여전히 분리되어 있으므로 값이 섞이지는 않는다)
+function getCurrentCharKey() {
+    return getCurrentChatKey();
 }
 
 function getCurrentChatName(context) {
@@ -234,7 +315,7 @@ function getCurrentChatKey() {
         return `group::${groupId}::${chatName}`;
     }
 
-    const charKey = getCurrentCharKey();
+    const charKey = getCharAvatarKey();
 
     if (!charKey) {
         return null;
@@ -248,15 +329,10 @@ function getScopeAvailability(scope) {
         return { available: true, reason: "" };
     }
 
+    // "캐릭터" 범위도 이제 채팅 범위와 마찬가지로 현재 채팅방이 있어야 사용 가능하다.
     if (scope === "char") {
-        const context = getContext();
-
-        if (isGroupContext(context)) {
-            return { available: false, reason: "그룹 채팅에서는 캐릭터 범위를 사용할 수 없습니다" };
-        }
-
         if (!getCurrentCharKey()) {
-            return { available: false, reason: "현재 캐릭터를 찾을 수 없습니다" };
+            return { available: false, reason: "현재 채팅을 찾을 수 없습니다" };
         }
 
         return { available: true, reason: "" };
@@ -277,12 +353,13 @@ function normalizeSettings() {
     settings.chats = settings.chats && typeof settings.chats === "object" ? settings.chats : {};
     settings.presets = sanitizePresets(settings.presets);
     settings.extensionEnabled = typeof settings.extensionEnabled === "boolean" ? settings.extensionEnabled : defaultSettings.extensionEnabled;
-    settings.directionPrompt = typeof settings.directionPrompt === "string" ? settings.directionPrompt : defaultSettings.directionPrompt;
-    settings.promptDepth = Number.isInteger(settings.promptDepth) ? settings.promptDepth : defaultSettings.promptDepth;
-    settings.defaultScope = ["global", "char", "chat"].includes(settings.defaultScope) ? settings.defaultScope : defaultSettings.defaultScope;
-    settings.lastScope = ["global", "char", "chat"].includes(settings.lastScope) ? settings.lastScope : settings.defaultScope;
+    settings.directionPrompt = normalizeDirectionPromptObject(settings.directionPrompt);
+    settings.promptDepth = normalizePromptDepth(settings.promptDepth);
+    settings.lastScope = ["global", "char", "chat"].includes(settings.lastScope) ? settings.lastScope : "chat";
     settings._migratedV2 = Boolean(settings._migratedV2);
     settings._migratedV3 = Boolean(settings._migratedV3);
+    settings._migratedV4 = Boolean(settings._migratedV4);
+    settings._migratedV5 = Boolean(settings._migratedV5);
 
     Object.keys(settings.chars).forEach((key) => {
         settings.chars[key] = sanitizeScopeState(settings.chars[key]);
@@ -361,6 +438,61 @@ function migrateV3PresetsIfNeeded() {
     return true;
 }
 
+// v3까지 "캐릭터" 범위는 캐릭터 카드 전체(모든 채팅방 공용)로 저장되었다.
+// v4부터는 채팅방 단위로 바뀌었는데, 예전 값은 "그 캐릭터의 어느 채팅방에서 썼는지"
+// 기록이 없어(원래 모든 채팅방이 같은 값을 공유했음) 특정 채팅방으로 옮겨줄 수가 없다.
+// 그래서 예전 형식(키에 "::"가 없는, 아바타 파일명만 있는 캐릭터 범위 데이터)은 정리한다.
+function migrateV4LegacyCharScopeIfNeeded() {
+    const settings = getSettings();
+
+    if (settings._migratedV4) {
+        return false;
+    }
+
+    let removed = 0;
+
+    Object.keys(settings.chars || {}).forEach((key) => {
+        if (!key.includes("::")) {
+            delete settings.chars[key];
+            removed += 1;
+        }
+    });
+
+    settings._migratedV4 = true;
+
+    if (removed > 0) {
+        console.log(`${LOG_PREFIX} 캐릭터 범위가 채팅 단위로 바뀌면서, 캐릭터 전체 공용으로 저장돼 있던 예전 데이터 ${removed}개를 정리했습니다.`);
+    }
+
+    return true;
+}
+
+// v4까지는 프롬프트 템플릿이 문자열 하나였고, 모든 범위가 그 템플릿을 그대로 반복해서 썼다.
+// v5부터는 범위별로 완전히 다른 템플릿을 쓴다. 예전에 직접 고쳐 썼던 프롬프트가 있으면
+// (기본값과 다르면) "채팅" 범위 것으로 그대로 옮겨준다 — 원래 이 문구 자체가
+// "다음 채팅 지시"용으로 쓰여진 것이었기 때문이다. 전역/캐릭터는 새 기본 템플릿을 받는다.
+function migrateV5DirectionPromptIfNeeded() {
+    const settings = getSettings();
+
+    if (settings._migratedV5) {
+        return false;
+    }
+
+    if (typeof settings.directionPrompt === "string") {
+        const legacy = settings.directionPrompt;
+        settings.directionPrompt = { ...DEFAULT_DIRECTION_PROMPTS };
+
+        if (legacy && legacy.trim() !== "" && legacy !== DEFAULT_DIRECTION_PROMPT) {
+            settings.directionPrompt.chat = legacy;
+        }
+
+        console.log(`${LOG_PREFIX} Direction 프롬프트가 범위별 템플릿으로 나뉘었습니다. 기존 프롬프트는 "채팅" 범위로 옮겼습니다.`);
+    }
+
+    settings._migratedV5 = true;
+    return true;
+}
+
 // 설정 로드
 async function loadSettings() {
     const settings = getSettings();
@@ -371,10 +503,12 @@ async function loadSettings() {
 
     const migrated = migrateV1SettingsIfNeeded();
     const migratedV3 = migrateV3PresetsIfNeeded();
+    const migratedV4 = migrateV4LegacyCharScopeIfNeeded();
+    const migratedV5 = migrateV5DirectionPromptIfNeeded();
     const pruned = pruneRemovedPlaceholders();
     normalizeSettings();
 
-    if (migrated || migratedV3 || pruned) {
+    if (migrated || migratedV3 || migratedV4 || migratedV5 || pruned) {
         saveSettingsDebounced();
     }
 }
@@ -561,8 +695,8 @@ function ensureUsableCurrentScope() {
         return;
     }
 
-    const defaultScope = getSettings().defaultScope;
-    const fallbackOrder = [defaultScope, "chat", "char", "global"];
+    // 지금 범위를 못 쓰면 채팅 > 캐릭터 > 전역 순으로 사용 가능한 범위를 찾는다.
+    const fallbackOrder = ["chat", "char", "global"];
 
     for (const scope of fallbackOrder) {
         const available = getScopeAvailability(scope);
@@ -667,6 +801,10 @@ function syncPopupByCurrentState() {
         .val(settings.content || "")
         .prop("disabled", !settings.enabled);
 
+    // 채팅 범위는 프리셋을 쓸 일이 없으므로 프리셋 줄을 숨기고, 그만큼의 공간을
+    // 입력칸(textarea)을 늘리는 데 쓴다. 팝업 자체 크기는 세 범위 모두 동일하게 유지된다.
+    compactUIPopup.toggleClass("dm-compact--hide-preset", currentScope === "chat");
+
     refreshScopeButtons();
     renderPresetSelect();
     updateAppliedIndicator();
@@ -730,7 +868,11 @@ function closeCompactUIPopup() {
     }
 
     if (compactUIButton) {
-        compactUIButton.removeClass("dm-compact--hasPopup");
+        // 클래스 대신 속성으로 표시: 서드파티 UI 커스텀 스크립트(예: 재단사)가
+        // 버튼 classList를 기반으로 고유 키를 계산하는 경우, 클래스가 늘었다 줄었다
+        // 하면 팝업 열림/닫힘에 따라 다른 버튼으로 인식되어 저장된 위치 설정이
+        // 초기화되는 문제가 생길 수 있다. data 속성은 그런 키 계산에 영향을 주지 않는다.
+        compactUIButton.removeAttr("data-dm-popup-open");
     }
 
     $(document).off("click.compactUI");
@@ -743,11 +885,11 @@ function showCompactUIPopup() {
     }
 
     const settings = getSettings();
-    // 마지막으로 보고 있던 범위 탭을 그대로 복원 (없으면 기본 범위)
-    currentScope = settings.lastScope || settings.defaultScope;
+    // 마지막으로 보고 있던 범위 탭을 그대로 복원 (없으면 채팅 범위)
+    currentScope = settings.lastScope || "chat";
     ensureUsableCurrentScope();
 
-    compactUIButton.addClass("dm-compact--hasPopup");
+    compactUIButton.attr("data-dm-popup-open", "true");
 
     const popupHtml = `
         <div class="dm-compact--popup">
@@ -756,26 +898,15 @@ function showCompactUIPopup() {
                     <input type="checkbox" class="dm-compact--radio">
                     <div class="dm-compact--title"></div>
                 </div>
-                <button class="dm-compact--nav dm-compact--clear" title="내용 지우기" type="button">
-                    <i class="fa-solid fa-eraser"></i>
-                </button>
             </div>
 
             <div class="dm-compact--scope-row">
-                <span>범위:</span>
                 <button class="dm-compact--scope-btn" data-scope="global" type="button">전역</button>
                 <button class="dm-compact--scope-btn" data-scope="char" type="button">캐릭터</button>
                 <button class="dm-compact--scope-btn" data-scope="chat" type="button">채팅</button>
-                <button class="dm-compact--history-btn dm-compact--history-prev" type="button" title="이전 내용 보기">
-                    <i class="fa-solid fa-arrow-left"></i>
-                </button>
-                <button class="dm-compact--history-btn dm-compact--history-next" type="button" title="현재 내용 보기">
-                    <i class="fa-solid fa-arrow-right"></i>
-                </button>
             </div>
 
             <div class="dm-compact--preset-row">
-                <span>프리셋:</span>
                 <select class="dm-compact--preset-select" aria-label="프리셋 선택"></select>
                 <button class="dm-compact--preset-btn dm-compact--preset-save" type="button" title="현재 내용 프리셋 저장">
                     <i class="fa-solid fa-floppy-disk"></i>
@@ -791,7 +922,21 @@ function showCompactUIPopup() {
             <div class="dm-compact--content">
                 <textarea class="dm-compact--textarea" placeholder="Direction 내용을 입력하세요..."></textarea>
             </div>
-            <div class="dm-compact--indicator"></div>
+
+            <div class="dm-compact--footer">
+                <div class="dm-compact--indicator"></div>
+                <div class="dm-compact--footer-actions">
+                    <button class="dm-compact--history-btn dm-compact--history-prev" type="button" title="이전 내용 보기">
+                        <i class="fa-solid fa-arrow-left"></i>
+                    </button>
+                    <button class="dm-compact--history-btn dm-compact--history-next" type="button" title="현재 내용 보기">
+                        <i class="fa-solid fa-arrow-right"></i>
+                    </button>
+                    <button class="dm-compact--nav dm-compact--clear" title="내용 지우기" type="button">
+                        <i class="fa-solid fa-eraser"></i>
+                    </button>
+                </div>
+            </div>
         </div>
     `;
 
@@ -822,10 +967,21 @@ function setupCompactUIEventListeners() {
             return;
         }
 
+        // 벗어나는 스코프가 속한 그룹의 지금 입력칸 높이를 기억해둔다.
+        const textarea = compactUIPopup.find(".dm-compact--textarea");
+        const outgoingGroup = textareaHeightGroup(currentScope);
+        compactUITextareaHeights[outgoingGroup] = textarea.length ? textarea[0].style.height : "";
+
         currentScope = nextScope;
         getSettings().lastScope = nextScope;
         saveSettingsDebounced();
         syncPopupByCurrentState();
+
+        // 전환해 들어온 스코프가 속한 그룹의 높이를 복원 (없으면 기본 크기로 돌아감)
+        const incomingGroup = textareaHeightGroup(nextScope);
+        if (textarea.length) {
+            textarea[0].style.height = compactUITextareaHeights[incomingGroup] || "";
+        }
     });
 
     // 이전 내용 <-> 현재 내용 토글 (두 버튼 모두 동일하게 내용을 맞바꿈)
@@ -1131,18 +1287,22 @@ async function initializeExtensionMenu() {
 // 확장 메뉴 UI 업데이트
 function updateExtensionMenuUI() {
     const settings = getSettings();
+    const prompts = normalizeDirectionPromptObject(settings.directionPrompt);
 
     // 활성화 체크박스 상태 설정
     $("#direction_manager_enabled").prop("checked", settings.extensionEnabled);
 
-    // 프롬프트 텍스트 설정
-    $("#direction_prompt_text").val(settings.directionPrompt || DEFAULT_DIRECTION_PROMPT);
+    // 프롬프트 탭(전역/캐릭터/채팅) 활성 표시 + 지금 선택된 탭의 프롬프트 내용 표시
+    $(".dm-prompt-tab-btn")
+        .removeClass("dm-prompt-tab-btn--active")
+        .filter(`[data-scope="${promptEditorScope}"]`)
+        .addClass("dm-prompt-tab-btn--active");
+    $("#direction_prompt_text").val(prompts[promptEditorScope] ?? "");
 
-    // Depth 설정
-    $("#direction_prompt_depth").val(settings.promptDepth || 1);
-
-    // 기본 스코프 설정
-    $("#direction_default_scope").val(settings.defaultScope || "chat");
+    // 범위별 Depth 설정
+    $("#direction_prompt_depth_global").val(settings.promptDepth?.global ?? 1);
+    $("#direction_prompt_depth_char").val(settings.promptDepth?.char ?? 1);
+    $("#direction_prompt_depth_chat").val(settings.promptDepth?.chat ?? 1);
 }
 
 async function clearCurrentCharScopeData() {
@@ -1218,37 +1378,44 @@ function setupExtensionMenuEventHandlers() {
         saveSettingsDebounced();
     });
 
-    // 프롬프트 텍스트 변경 이벤트 (실시간 저장)
+    // 프롬프트 탭(전역/캐릭터/채팅) 전환 이벤트
+    $(".dm-prompt-tab-btn").on("click", function () {
+        promptEditorScope = String($(this).data("scope"));
+        updateExtensionMenuUI();
+    });
+
+    // 프롬프트 텍스트 변경 이벤트 (실시간 저장, 지금 선택된 탭에만 저장)
     $("#direction_prompt_text").on("input", function () {
-        getSettings().directionPrompt = $(this).val();
+        const settings = getSettings();
+        settings.directionPrompt = normalizeDirectionPromptObject(settings.directionPrompt);
+        settings.directionPrompt[promptEditorScope] = String($(this).val() ?? "");
         saveSettingsDebounced();
     });
 
-    // Depth 설정 변경 이벤트
-    $("#direction_prompt_depth").on("input", function () {
-        const value = parseInt(String($(this).val()), 10);
-        getSettings().promptDepth = Number.isNaN(value) ? 1 : value;
-        saveSettingsDebounced();
-    });
-
-    // 기본 스코프 설정 변경 이벤트
-    $("#direction_default_scope").on("change", function () {
-        const value = String($(this).val());
-
-        if (["global", "char", "chat"].includes(value)) {
-            getSettings().defaultScope = value;
+    // 범위별 Depth 설정 변경 이벤트
+    const bindScopeDepthInput = (scope, elementId) => {
+        $(elementId).on("input", function () {
+            const value = parseInt(String($(this).val()), 10);
+            const settings = getSettings();
+            settings.promptDepth = normalizePromptDepth(settings.promptDepth);
+            settings.promptDepth[scope] = Number.isNaN(value) ? 1 : value;
             saveSettingsDebounced();
-        }
-    });
+        });
+    };
 
-    // 기본값 초기화 버튼
+    bindScopeDepthInput("global", "#direction_prompt_depth_global");
+    bindScopeDepthInput("char", "#direction_prompt_depth_char");
+    bindScopeDepthInput("chat", "#direction_prompt_depth_chat");
+
+    // 기본값 초기화 버튼 (세 범위 프롬프트 + Depth 전부 기본값으로)
     $("#direction_reset_prompt").on("click", function () {
-        $("#direction_prompt_text").val(DEFAULT_DIRECTION_PROMPT);
-        $("#direction_prompt_depth").val(1);
-        $("#direction_default_scope").val("chat");
-        getSettings().directionPrompt = DEFAULT_DIRECTION_PROMPT;
-        getSettings().promptDepth = 1;
-        getSettings().defaultScope = "chat";
+        const settings = getSettings();
+        settings.directionPrompt = { ...DEFAULT_DIRECTION_PROMPTS };
+        settings.promptDepth = { global: 1, char: 1, chat: 1 };
+        $("#direction_prompt_depth_global").val(1);
+        $("#direction_prompt_depth_char").val(1);
+        $("#direction_prompt_depth_chat").val(1);
+        updateExtensionMenuUI();
         saveSettingsDebounced();
     });
 
@@ -1262,6 +1429,8 @@ function handleContextChanged() {
 }
 
 // 프롬프트 주입 함수
+// 전역/캐릭터/채팅은 각자 다른 Depth를 가질 수 있으므로, 활성화된 범위마다
+// 별도의 system 메시지를 만들어 그 범위의 Depth 위치에 각각 삽입한다.
 function injectDirectionPrompt(eventData) {
     const settings = getSettings();
 
@@ -1270,40 +1439,44 @@ function injectDirectionPrompt(eventData) {
         return;
     }
 
-    const combined = resolveCombinedContent("direction");
-
-    // 활성화된 범위가 하나도 없으면 주입하지 않음
-    if (activeScopesEmpty(combined)) {
-        return;
-    }
-
-    // 프롬프트가 비어있으면 주입하지 않음
-    if (!settings.directionPrompt || settings.directionPrompt.trim() === "") {
-        return;
-    }
-
-    // 플레이스홀더 치환
-    let processedPrompt = settings.directionPrompt;
-
-    processedPrompt = processedPrompt
-        .replace(/\{\{direction\}\}/g, combined.content || "")
-        // 예전에 커스텀 프롬프트에 남긴 흔적이 있어도 확장에서는 더 이상 처리하지 않음
-        .replace(/\{\{char\}\}/g, "")
-        .replace(/\{\{user\}\}/g, "");
-
-    const depth = settings.promptDepth || 1;
-
     // 참고 파일 방식: eventData.chat 또는 eventData.messages 확인
     const messages = eventData.chat || eventData.messages;
 
-    if (messages && Array.isArray(messages)) {
-        // system 메시지 생성
+    if (!messages || !Array.isArray(messages)) {
+        return;
+    }
+
+    const templates = normalizeDirectionPromptObject(settings.directionPrompt);
+
+    SCOPE_ORDER.forEach((scope) => {
+        const value = getScopedPlaceholder(scope, "direction");
+
+        if (!isValidEnabledContent(value)) {
+            return;
+        }
+
+        const template = templates[scope];
+
+        // 이 범위의 프롬프트 템플릿이 비어있으면 이 범위는 건너뜀 (다른 범위는 계속 진행)
+        if (!template || template.trim() === "") {
+            return;
+        }
+
+        // 플레이스홀더 치환 (각 범위는 자기 템플릿에만 자기 내용을 채운다 — 다른 범위와 합쳐지지 않음)
+        const processedPrompt = template
+            .replace(/\{\{direction\}\}/g, value.content.trim())
+            // 예전에 커스텀 프롬프트에 남긴 흔적이 있어도 확장에서는 더 이상 처리하지 않음
+            .replace(/\{\{char\}\}/g, "")
+            .replace(/\{\{user\}\}/g, "");
+
         const systemMessage = {
             role: "system",
             content: processedPrompt,
         };
 
-        // 참고 파일의 방식을 따라 depth 적용
+        const depth = getScopeDepth(scope);
+
+        // 참고 파일의 방식을 따라 범위별 depth 적용
         if (depth === 0) {
             // 맨 끝에 추가
             messages.push(systemMessage);
@@ -1312,7 +1485,7 @@ function injectDirectionPrompt(eventData) {
             const insertIndex = Math.max(messages.length - depth, 0);
             messages.splice(insertIndex, 0, systemMessage);
         }
-    }
+    });
 }
 
 // 확장 초기화
