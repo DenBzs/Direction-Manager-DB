@@ -10,7 +10,7 @@
     margin-left: -5px;
     font-size: 0.5em;
     background-color: transparent;
-    opacity: 0.5;
+    opacity: 1;
     transition: 200ms;
     cursor: pointer;
     border: none;
@@ -23,11 +23,14 @@
     background-color: var(--white30a);
 }
 
-.dm-compact--button.dm-compact--hasPopup {
+.dm-compact--button[data-dm-popup-open="true"] {
     opacity: 1;
 }
 
-/* 컴팩트 UI 팝업 스타일 */
+/* 컴팩트 UI 팝업 스타일
+   전역/캐릭터/채팅 세 범위 모두 팝업 전체 높이가 완전히 똑같아야 하므로,
+   높이를 고정하고 내부를 flex column으로 짜서, 프리셋 줄이 없는 채팅 범위에서는
+   그만큼의 공간을 입력칸(textarea)이 자동으로 채우도록 한다. */
 .dm-compact--popup {
     filter: drop-shadow(1px 1px 2px var(--black50a));
     z-index: 30000;
@@ -40,6 +43,10 @@
     right: 0;
     width: 450px;
     max-width: 90vw;
+    height: calc(260px + 2.5 * var(--mainFontSize));
+    max-height: 45vh;
+    display: flex;
+    flex-direction: column;
     transition: 200ms;
     transform-origin: calc(100% - 0.5em) calc(100% + 0.5em);
     scale: 1 0;
@@ -59,6 +66,7 @@
     border-bottom: 1px solid var(--SmartThemeBorderColor);
     background-color: var(--SmartThemeBlurTintColor);
     gap: 8px;
+    flex-shrink: 0;
 }
 
 .dm-compact--title-row {
@@ -71,8 +79,8 @@
 
 .dm-compact--title {
     font-family: 'Courier New', monospace;
-    font-size: 14px;
-    font-weight: 600;
+    font-size: 16px;
+    font-weight: 800;
     color: var(--SmartThemeQuoteColor);
     white-space: nowrap;
     overflow: hidden;
@@ -132,16 +140,9 @@
 .dm-compact--scope-row {
     display: flex;
     gap: 6px;
-    padding: 6px 8px;
+    padding: 8px 8px 4px;
     border-bottom: 1px solid var(--SmartThemeBorderColor);
     align-items: center;
-}
-
-.dm-compact--scope-row > span,
-.dm-compact--preset-row > span {
-    font-size: 13px;
-    font-weight: 600;
-    color: var(--SmartThemeBodyColor);
     flex-shrink: 0;
 }
 
@@ -150,14 +151,27 @@
     border: 1px solid var(--SmartThemeBorderColor);
     color: var(--SmartThemeBodyColor);
     border-radius: 4px;
-    height: 28px;
-    padding: 0 8px;
+    height: 30px;
+    padding: 0 10px;
     cursor: pointer;
     transition: all 0.2s ease;
+    font-size: 15px;
+    font-weight: 600;
 }
 
 .dm-compact--scope-btn--active {
-    background-color: var(--SmartThemeQuoteColor);
+    /* color-mix를 지원하지 않는 환경(webview 등)에서도 항상 옅게 나오도록,
+       테마 색상에 기대지 않는 반투명 회색 배경 + 테마색 테두리로 표시 */
+    background-color: rgba(127, 127, 127, 0.22);
+    border-color: var(--SmartThemeQuoteColor);
+    color: var(--SmartThemeQuoteColor);
+}
+
+/* 확장 설정 패널의 범위별 Direction 프롬프트 탭 (전역/캐릭터/채팅) */
+.dm-prompt-tab-btn--active {
+    background-color: rgba(127, 127, 127, 0.22);
+    border-color: var(--SmartThemeQuoteColor);
+    color: var(--SmartThemeQuoteColor);
 }
 
 .dm-compact--scope-btn:disabled,
@@ -167,16 +181,13 @@
     cursor: not-allowed;
 }
 
-.dm-compact--history-prev {
-    margin-left: auto;
-}
-
 .dm-compact--preset-row {
     display: flex;
     gap: 6px;
-    padding: 6px 8px;
+    padding: 3px 8px;
     border-bottom: 1px solid var(--SmartThemeBorderColor);
     align-items: center;
+    flex-shrink: 0;
 }
 
 .dm-compact--preset-select {
@@ -192,14 +203,20 @@
     box-sizing: border-box;
 }
 
+/* 프리셋 줄이 있든 없든(채팅 범위) 팝업 전체 높이가 고정돼 있으므로,
+   이 영역이 flex:1로 남는 공간을 항상 정확히 채운다 */
 .dm-compact--content {
-    padding: 8px;
+    padding: 4px 6px;
+    flex: 1 1 auto;
+    min-height: 0;
+    display: flex;
 }
 
 .dm-compact--textarea {
     width: 100%;
-    min-height: 120px;
-    max-height: 200px;
+    flex: 1 1 auto;
+    min-height: 0;
+    max-height: 100%;
     padding: 8px;
     border: 1px solid var(--SmartThemeBorderColor);
     border-radius: 5px;
@@ -210,7 +227,7 @@
     resize: vertical;
     box-sizing: border-box;
     transition: all 0.2s ease;
-    line-height: 1.4;
+    line-height: 1.25;
 }
 
 .dm-compact--textarea:focus {
@@ -228,14 +245,39 @@
     cursor: not-allowed;
 }
 
+/* 하단 바: 상태 표시(왼쪽) + 지우개/이전·다음 내용 버튼(오른쪽, 맨 아래) */
+.dm-compact--footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 4px 8px;
+    border-top: 1px solid var(--SmartThemeBorderColor);
+    flex-shrink: 0;
+}
+
+.dm-compact--footer-actions {
+    display: flex;
+    gap: 6px;
+    flex-shrink: 0;
+}
+
 .dm-compact--indicator {
-    padding: 6px 8px;
     color: var(--SmartThemeBodyColor);
     opacity: 0.85;
     font-size: 12px;
     font-weight: 600;
-    border-top: 1px solid var(--SmartThemeBorderColor);
     min-height: 1em;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* 채팅 범위에서는 프리셋 줄을 숨긴다. 팝업 전체 높이는 flex column 구조 덕분에
+   항상 고정돼 있으므로, 프리셋 줄이 없어진 만큼의 공간은 .dm-compact--content(flex:1)가
+   자동으로 채운다 — 전역/캐릭터/채팅 팝업 크기가 항상 정확히 같다. */
+.dm-compact--popup.dm-compact--hide-preset .dm-compact--preset-row {
+    display: none;
 }
 
 /* 태블릿 반응형 디자인 */
@@ -254,11 +296,13 @@
 @media (max-width: 480px) {
     .dm-compact--popup {
         width: 320px;
+        height: calc(225px + 2.5 * var(--mainFontSize) * 0.85);
+        max-height: 40vh;
     }
 
     .dm-compact--header {
-        padding: 6px 8px;
-        gap: 6px;
+        padding: 4px 6px;
+        gap: 4px;
     }
 
     .dm-compact--nav,
@@ -279,27 +323,25 @@
     }
 
     .dm-compact--scope-btn {
-        height: 24px;
-        padding: 0 6px;
-        font-size: 11px;
+        height: 26px;
+        padding: 0 7px;
+        font-size: 13px;
+        font-weight: 600;
     }
 
-    .dm-compact--scope-row,
+    .dm-compact--scope-row {
+        padding: 6px 6px 3px;
+    }
+
     .dm-compact--preset-row {
-        padding: 6px;
-    }
-
-    .dm-compact--scope-row > span,
-    .dm-compact--preset-row > span {
-        font-size: 11px;
+        padding: 2px 6px;
     }
 
     .dm-compact--content {
-        padding: 6px;
+        padding: 3px 5px;
     }
 
     .dm-compact--textarea {
-        min-height: 80px;
         font-size: calc(var(--mainFontSize) * 0.85);
     }
 }
