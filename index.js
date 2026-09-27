@@ -58,7 +58,6 @@ const SCOPE_LABELS = {
 };
 
 const SCOPE_ORDER = ["global", "char", "chat"];
-const SCOPE_DISPLAY_NAMES = { global: "전역", char: "캐릭터", chat: "채팅" };
 
 function defaultScopeState() {
     return {
@@ -97,6 +96,101 @@ function textareaHeightGroup(scope) {
     return scope === "chat" ? "chat" : "shared";
 }
 let compactUITextareaHeights = { shared: "", chat: "" };
+// 채팅 탭에서 유저가 직접(리사이즈 손잡이로) 크기를 조절한 적이 있는지.
+// 한 번이라도 조절하면 그 뒤로는 전역/캐릭터와 별개로 독립적으로 기억한다.
+let chatHeightIsCustom = false;
+// 리사이즈 손잡이를 잡았을 수도 있는 후보 제스처의 "잡기 전" 높이. mouseup/touchend
+// 시점에 실제로 높이가 바뀌었는지 비교해서 "진짜 리사이즈였는지" 판단하는 데 쓴다.
+let resizeCandidateHeight = null;
+// 프리셋 줄은 채팅 탭에서 display:none으로 완전히 없어지므로, 그 높이를 팝업을
+// 열 때 한 번 측정해서 캐싱해둔다(채팅 탭이 그 공간만큼 textarea를 키우는 데 사용).
+let cachedPresetRowHeight = 0;
+
+// 지금 숨겨져 있어도(display:none) 잠깐 보이게 만들어서 실제 높이를 측정한다.
+function measurePresetRowHeight() {
+    if (!compactUIPopup) return 0;
+
+    const presetRow = compactUIPopup.find(".dm-compact--preset-row");
+
+    if (!presetRow.length) return 0;
+
+    const wasHidden = compactUIPopup.hasClass("dm-compact--hide-preset");
+
+    if (wasHidden) {
+        compactUIPopup.removeClass("dm-compact--hide-preset");
+    }
+
+    const height = presetRow.outerHeight(true) || 0;
+
+    if (wasHidden) {
+        compactUIPopup.addClass("dm-compact--hide-preset");
+    }
+
+    return height;
+}
+
+// 팝업을 처음 열었을 때(유저가 아직 드래그로 리사이즈하기 전) textarea 기본 높이
+function defaultTextareaHeightPx() {
+    return window.innerWidth <= 480 ? "130px" : "160px";
+}
+
+// 지금 스코프 그룹에 저장된 높이가 있으면 복원하고, 없으면 기본 높이로 되돌린다.
+// (팝업을 새로 열 때 + 스코프 탭을 전환할 때 공통으로 사용)
+//
+// 채팅 탭만 예외: 유저가 아직 채팅에서 직접 리사이즈한 적이 없으면, 전역/캐릭터
+// (shared) 높이 + 프리셋 줄 높이로 자동으로 맞춰서 팝업 총 높이가 같아 보이게
+// 한다(프리셋 줄이 없어진 자리를 입력칸이 채우는 셈). 한 번이라도 직접 리사이즈하면
+// 그 뒤로는 전역/캐릭터와 완전히 별개로(chatHeightIsCustom) 독립적으로 기억한다.
+function restoreTextareaHeightForCurrentScope() {
+    if (!compactUIPopup) return;
+
+    const textarea = compactUIPopup.find(".dm-compact--textarea");
+
+    if (!textarea.length) return;
+
+    if (currentScope === "chat" && !chatHeightIsCustom) {
+        const sharedPx = parseFloat(compactUITextareaHeights.shared || defaultTextareaHeightPx())
+            || parseFloat(defaultTextareaHeightPx());
+        textarea[0].style.height = `${Math.round(sharedPx + cachedPresetRowHeight)}px`;
+        return;
+    }
+
+    const group = textareaHeightGroup(currentScope);
+    textarea[0].style.height = compactUITextareaHeights[group] || defaultTextareaHeightPx();
+}
+
+// 팝업을 열 때 딱 한 번만 textarea의 max-height를 계산해서 걸어준다.
+// 화면(뷰포트) 기준으로 계산하되, 이후 키보드가 열리고 닫혀도 다시 계산하지
+// 않는다 — 키보드 상태에 따라 크기가 바뀌는 것 자체가 버벅임의 원인이었기 때문.
+function applyTextareaHeightCap() {
+    if (!compactUIPopup) return;
+
+    const textarea = compactUIPopup.find(".dm-compact--textarea");
+
+    if (!textarea.length) return;
+
+    const header = compactUIPopup.find(".dm-compact--header");
+    const scopeRow = compactUIPopup.find(".dm-compact--scope-row");
+
+    // 프리셋 줄은 채팅 탭에서 display:none이라 그 순간엔 측정할 수 없으므로,
+    // 팝업을 열 때 미리 캐싱해둔 값(cachedPresetRowHeight)을 항상 더해준다.
+    const chromeHeight =
+        (header.outerHeight(true) || 0) +
+        (scopeRow.outerHeight(true) || 0) +
+        cachedPresetRowHeight +
+        16; // 팝업 테두리 + content 패딩 여유분
+
+    // window.innerHeight는 키보드가 열려 있으면 그만큼 줄어든 값이라, 팝업을 보통
+    // 그렇게(키보드가 이미 열린 채로) 열게 되는 이 UI 특성상 캡이 계속 작게 잡히는
+    // 문제가 있었다. 그래서 키보드 상태와 무관한 화면 자체 크기(screen.availHeight)를
+    // 기준으로 잡는다 — 키보드가 열려 있는 동안 캡 근처까지 늘리면 팝업 위쪽이
+    // 화면 밖으로 나갈 수 있지만, 키보드를 닫으면 바로 정상적으로 다 보인다.
+    const viewportBasis = (window.screen && window.screen.availHeight) || window.innerHeight;
+    const viewportBudget = viewportBasis * (window.innerWidth <= 480 ? 0.55 : 0.6);
+    const maxTextareaHeight = Math.max(110, Math.round(viewportBudget - chromeHeight));
+
+    textarea.css("max-height", `${maxTextareaHeight}px`);
+}
 // 현재 범위+플레이스홀더를 팝업에 불러온 시점의 content (이전 내용 추적용)
 let editSessionSnapshot = null;
 // ST 네이티브 Popup(확인/입력창)이 떠 있는 동안 true. 이 동안에는
@@ -769,19 +863,22 @@ function renderPresetSelect() {
     compactUIPopup.find(".dm-compact--preset-delete").prop("disabled", !hasSelection);
 }
 
+// "이 범위가 켜져 있고 실제로 적용 중인 내용이 있는지"를 스코프 버튼
+// (이모지 채도 + 글자색)으로 표시한다. 예전엔 별도 줄(🟢활성: ...)로 텍스트
+// 표시했지만, 그 줄 자체를 없애고 각 스코프 버튼에 상태를 얹는 방식으로 옮겼다.
 function updateAppliedIndicator() {
     if (!compactUIPopup) return;
 
     const placeholder = getPopupCurrentPlaceholder();
     const combined = resolveCombinedContent(placeholder.key);
-    let text = "⚪ 모든 범위 비활성";
+    const activeScopes = new Set(activeScopesEmpty(combined) ? [] : combined.activeScopes);
 
-    if (!activeScopesEmpty(combined)) {
-        const names = combined.activeScopes.map((scope) => SCOPE_DISPLAY_NAMES[scope]).join(", ");
-        text = `🟢 활성: ${names}`;
-    }
+    SCOPE_ORDER.forEach((scope) => {
+        compactUIPopup
+            .find(`.dm-compact--scope-btn[data-scope="${scope}"]`)
+            .toggleClass("dm-compact--scope-btn--on", activeScopes.has(scope));
+    });
 
-    compactUIPopup.find(".dm-compact--indicator").text(text);
     refreshHistoryButtons();
 }
 
@@ -794,7 +891,6 @@ function syncPopupByCurrentState() {
     const settings = getCurrentScopeState(currentPlaceholder.key);
     editSessionSnapshot = settings.content;
 
-    compactUIPopup.find(".dm-compact--title").text(currentPlaceholder.name);
     compactUIPopup.find(".dm-compact--radio").prop("checked", settings.enabled);
     compactUIPopup
         .find(".dm-compact--textarea")
@@ -876,6 +972,7 @@ function closeCompactUIPopup() {
     }
 
     $(document).off("click.compactUI");
+    $(document).off("mouseup.dmResize touchend.dmResize");
 }
 
 // 컴팩트 UI 팝업 표시
@@ -894,16 +991,24 @@ function showCompactUIPopup() {
     const popupHtml = `
         <div class="dm-compact--popup">
             <div class="dm-compact--header">
-                <div class="dm-compact--title-row">
-                    <input type="checkbox" class="dm-compact--radio">
-                    <div class="dm-compact--title"></div>
-                </div>
+                <input type="checkbox" class="dm-compact--radio" title="이 범위 켜기/끄기">
+                <div class="dm-compact--title">🪄전개지시M</div>
+                <div class="dm-compact--header-spacer"></div>
+                <button class="dm-compact--history-btn dm-compact--history-prev" type="button" title="이전 내용 보기">
+                    <i class="fa-solid fa-arrow-left"></i>
+                </button>
+                <button class="dm-compact--history-btn dm-compact--history-next" type="button" title="현재 내용 보기">
+                    <i class="fa-solid fa-arrow-right"></i>
+                </button>
+                <button class="dm-compact--nav dm-compact--clear" title="내용 지우기" type="button">
+                    <i class="fa-solid fa-eraser"></i>
+                </button>
             </div>
 
             <div class="dm-compact--scope-row">
-                <button class="dm-compact--scope-btn" data-scope="global" type="button">전역</button>
-                <button class="dm-compact--scope-btn" data-scope="char" type="button">캐릭터</button>
-                <button class="dm-compact--scope-btn" data-scope="chat" type="button">채팅</button>
+                <button class="dm-compact--scope-btn" data-scope="global" type="button"><span class="dm-compact--scope-emoji">🌐</span>전역</button>
+                <button class="dm-compact--scope-btn" data-scope="char" type="button"><span class="dm-compact--scope-emoji">🎭</span>캐릭터</button>
+                <button class="dm-compact--scope-btn" data-scope="chat" type="button"><span class="dm-compact--scope-emoji">🗨️</span>채팅</button>
             </div>
 
             <div class="dm-compact--preset-row">
@@ -922,21 +1027,6 @@ function showCompactUIPopup() {
             <div class="dm-compact--content">
                 <textarea class="dm-compact--textarea" placeholder="Direction 내용을 입력하세요..."></textarea>
             </div>
-
-            <div class="dm-compact--footer">
-                <div class="dm-compact--indicator"></div>
-                <div class="dm-compact--footer-actions">
-                    <button class="dm-compact--history-btn dm-compact--history-prev" type="button" title="이전 내용 보기">
-                        <i class="fa-solid fa-arrow-left"></i>
-                    </button>
-                    <button class="dm-compact--history-btn dm-compact--history-next" type="button" title="현재 내용 보기">
-                        <i class="fa-solid fa-arrow-right"></i>
-                    </button>
-                    <button class="dm-compact--nav dm-compact--clear" title="내용 지우기" type="button">
-                        <i class="fa-solid fa-eraser"></i>
-                    </button>
-                </div>
-            </div>
         </div>
     `;
 
@@ -953,13 +1043,54 @@ function showCompactUIPopup() {
     // 이벤트 핸들러 설정
     setupCompactUIEventListeners();
     syncPopupByCurrentState();
+
+    // textarea 기본/복원 높이 적용 + 화면을 벗어나지 않도록 상한선을 딱 한 번 계산
+    // (이후 키보드가 열리고 닫혀도 다시 계산하지 않음 — 그게 버벅임의 원인이었음)
+    cachedPresetRowHeight = measurePresetRowHeight();
+    restoreTextareaHeightForCurrentScope();
+    applyTextareaHeightCap();
 }
 
 // 컴팩트 UI 이벤트 리스너 설정
 function setupCompactUIEventListeners() {
     if (!compactUIPopup) return;
 
-    compactUIPopup.find(".dm-compact--scope-btn").on("click", function () {
+    // 스코프 탭 / 이전·다음 내용 / 지우개 버튼을 누를 때 textarea가 blur되어
+    // 키보드가 닫히지 않게 한다. 주의: touchstart에서 preventDefault()를 호출하면
+    // 브라우저가 그 터치에 대해 뒤따르는 click(마우스 호환 이벤트) 자체를 아예
+    // 만들어주지 않는다 — 그래서 버튼이 안 눌리는 것처럼 보였다. 그래서 여기서는
+    // touchstart 시점에 preventDefault로 blur만 막고, 실제 동작(handler)도 그
+    // 자리에서 바로 실행한 뒤 뒤이어 오는 click은 무시한다(중복 실행 방지).
+    // 마우스 환경에서는 touchstart가 없으니 click이 정상적으로 그대로 쓰인다.
+    function bindTapAction(selector, handler) {
+        let suppressNextClick = false;
+
+        compactUIPopup.on("touchstart", selector, function (e) {
+            if ($(this).prop("disabled")) return;
+            e.preventDefault();
+            suppressNextClick = true;
+            // 대부분의 모바일 브라우저는 touchstart에서 preventDefault를 부르면
+            // 뒤따르는 click을 아예 안 만들어주지만(그래서 여기서 직접 실행),
+            // 일부 환경(마우스도 같이 붙어있는 하이브리드 기기 등)에서 click이
+            // 그래도 올 수 있어 짧은 시간 후 자동으로 플래그를 풀어준다.
+            setTimeout(() => { suppressNextClick = false; }, 400);
+            handler.call(this, e);
+        });
+
+        compactUIPopup.on("mousedown", selector, (e) => {
+            e.preventDefault();
+        });
+
+        compactUIPopup.on("click", selector, function (e) {
+            if (suppressNextClick) {
+                suppressNextClick = false;
+                return;
+            }
+            handler.call(this, e);
+        });
+    }
+
+    bindTapAction(".dm-compact--scope-btn", function () {
         const nextScope = $(this).data("scope");
         const availability = getScopeAvailability(nextScope);
 
@@ -978,14 +1109,11 @@ function setupCompactUIEventListeners() {
         syncPopupByCurrentState();
 
         // 전환해 들어온 스코프가 속한 그룹의 높이를 복원 (없으면 기본 크기로 돌아감)
-        const incomingGroup = textareaHeightGroup(nextScope);
-        if (textarea.length) {
-            textarea[0].style.height = compactUITextareaHeights[incomingGroup] || "";
-        }
+        restoreTextareaHeightForCurrentScope();
     });
 
     // 이전 내용 <-> 현재 내용 토글 (두 버튼 모두 동일하게 내용을 맞바꿈)
-    compactUIPopup.find(".dm-compact--history-prev, .dm-compact--history-next").on("click", () => {
+    bindTapAction(".dm-compact--history-prev, .dm-compact--history-next", function () {
         const placeholder = getPopupCurrentPlaceholder();
         const scopedValue = getCurrentScopeState(placeholder.key);
 
@@ -1034,8 +1162,52 @@ function setupCompactUIEventListeners() {
         updateAppliedIndicator();
     });
 
+    // 체크박스(스코프 켜기/끄기)도 터치로 누르면 blur→키보드 닫힘이 발생했다.
+    // 체크박스는 클릭 시 브라우저가 checked를 뒤집고 "change"를 쏘는 방식이라,
+    // touchstart에서 preventDefault로 그 흐름 자체를 막은 뒤 우리가 직접
+    // checked를 뒤집고 change를 수동으로 발생시켜 위 로직을 그대로 재사용한다.
+    compactUIPopup.on("touchstart", ".dm-compact--radio", function (e) {
+        e.preventDefault();
+        const checkbox = $(this);
+        checkbox.prop("checked", !checkbox.prop("checked")).trigger("change");
+    });
+
+    compactUIPopup.on("mousedown", ".dm-compact--radio", (e) => {
+        e.preventDefault();
+    });
+
+    // 채팅 탭에서 유저가 textarea 리사이즈 손잡이(우하단 모서리)를 실제로 드래그해서
+    // 크기를 바꿨는지 감지한다. 이미 커스텀 크기로 넘어갔거나 채팅 탭이 아니면 무시.
+    // "잡은 지점이 모서리 근처였는지"만으로는 오탐(그냥 텍스트 커서 놓으려고 모서리
+    // 근처를 탭한 경우)이 생길 수 있어서, mouseup/touchend 때 실제로 높이가
+    // 바뀌었는지까지 확인한 뒤에만 커스텀으로 인정한다.
+    compactUIPopup.on("mousedown touchstart", ".dm-compact--textarea", function (e) {
+        if (currentScope !== "chat" || chatHeightIsCustom) {
+            resizeCandidateHeight = null;
+            return;
+        }
+
+        const point = (e.originalEvent && e.originalEvent.touches && e.originalEvent.touches[0]) || e.originalEvent || e;
+        const rect = this.getBoundingClientRect();
+        const nearResizeHandle = rect.right - point.clientX <= 20 && rect.bottom - point.clientY <= 20;
+
+        resizeCandidateHeight = nearResizeHandle ? this.style.height : null;
+    });
+
+    $(document).on("mouseup.dmResize touchend.dmResize", () => {
+        if (resizeCandidateHeight === null || !compactUIPopup) return;
+
+        const textarea = compactUIPopup.find(".dm-compact--textarea")[0];
+
+        if (textarea && textarea.style.height !== resizeCandidateHeight) {
+            chatHeightIsCustom = true;
+        }
+
+        resizeCandidateHeight = null;
+    });
+
     // 지우개 버튼: 확인창 없이 바로 삭제 (지우기 전 내용은 이전 내용으로 남아 화살표로 복원 가능)
-    compactUIPopup.find(".dm-compact--clear").on("click", function () {
+    bindTapAction(".dm-compact--clear", function () {
         const currentPlaceholder = getPopupCurrentPlaceholder();
         const scopedValue = getCurrentScopeState(currentPlaceholder.key);
 
