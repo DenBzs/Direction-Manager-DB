@@ -3,14 +3,9 @@ import { extension_settings, getContext } from "../../../extensions.js";
 import { saveSettingsDebounced, eventSource, event_types, characters, this_chid } from "../../../../script.js";
 import { Popup } from "../../../popup.js";
 
-// 확장 설정
 const extensionName = "Direction-Manager-DB";
 const LOG_PREFIX = "[🪄전개지시M]";
 
-// 기본 Direction 프롬프트 (범위별로 따로 관리)
-// - 채팅: 예전부터 쓰던 "다음 채팅에 반영할 지시" 문구를 그대로 유지
-// - 전역/캐릭터: 채팅용 문구의 핵심 지침(직접 인용하지 말고 자연스럽게 녹여낼 것)을
-//   각자의 목적에 맞게 반영해서 새로 작성
 const DEFAULT_DIRECTION_PROMPT_CHAT = `<direction>
 - Resume the story based on the director's instructions below.
 - The director only provides drafts; refine them into natural prose instead of directly quoting the sentences.
@@ -33,7 +28,7 @@ const DEFAULT_DIRECTION_PROMPT_CHAR = `<character_notes>
 {{direction}}
 </character_notes>`;
 
-// 구버전(v4 이전) 호환용 별칭: 그때는 프롬프트가 하나였고, 그 기본값이 지금의 "채팅" 기본값과 같다.
+// v4 이전 단일 프롬프트 시절의 기본값 (v5 마이그레이션 비교용)
 const DEFAULT_DIRECTION_PROMPT = DEFAULT_DIRECTION_PROMPT_CHAT;
 
 const DEFAULT_DIRECTION_PROMPTS = {
@@ -45,12 +40,12 @@ const DEFAULT_DIRECTION_PROMPTS = {
 function defaultPlaceholderState() {
     return {
         enabled: false,
+        entries: [""],
+        activeIndex: 0,
         content: "",
-        previousContent: "",
     };
 }
 
-// 범위별 프롬프트 라벨 (합쳐진 {{direction}} 매크로 등에서 AI가 성격이 다른 지시임을 구분하도록)
 const SCOPE_LABELS = {
     global: "[Format Rules]",
     char: "[Character Notes]",
@@ -58,6 +53,12 @@ const SCOPE_LABELS = {
 };
 
 const SCOPE_ORDER = ["global", "char", "chat"];
+
+// 기록에 남는 항목의 최대 개수(현재 보고 있는 칸 포함). 화면에는 N/5로 표시된다.
+const HISTORY_TOTAL_MAX = 5;
+const HISTORY_MIN_CHARS = 1;
+// 구버전 데이터({content, history} 형태) 호환용
+const HISTORY_MAX = HISTORY_TOTAL_MAX - 1;
 
 function defaultScopeState() {
     return {
@@ -72,14 +73,10 @@ const defaultSettings = {
     presets: {
         direction: { global: [], char: [], chat: [] },
     },
-    // 확장 메뉴 설정
     extensionEnabled: true,
-    // 범위(전역/캐릭터/채팅)별로 완전히 다른 프롬프트 템플릿을 따로 쓴다.
     directionPrompt: { ...DEFAULT_DIRECTION_PROMPTS },
-    // 범위별로 서로 다른 삽입 위치(Depth)를 쓸 수 있다.
-    // 0: Chat History 끝에 삽입, >0: 끝에서부터 N번째 위치에 삽입
+    // 0: Chat History 끝에 삽입, >0: 끝에서 N번째 위치에 삽입
     promptDepth: { global: 1, char: 1, chat: 1 },
-    // 팝업을 열 때 마지막으로 봤던 범위 탭을 기억해서 그대로 복원한다.
     lastScope: "chat",
     _migratedV2: false,
     _migratedV3: false,
@@ -87,26 +84,15 @@ const defaultSettings = {
     _migratedV5: false,
 };
 
-
 let currentScope = "chat";
-// 입력칸(textarea)을 드래그로 리사이즈했을 때, 전역/캐릭터는 높이를 공유하고
-// 채팅만 따로 기억하기 위한 그룹 저장소. 드래그 리사이즈는 별도 이벤트가 없으므로
-// 스코프를 전환하는 시점에 현재 높이를 읽어서 그룹별로 저장/복원한다.
 function textareaHeightGroup(scope) {
     return scope === "chat" ? "chat" : "shared";
 }
 let compactUITextareaHeights = { shared: "", chat: "" };
-// 채팅 탭에서 유저가 직접(리사이즈 손잡이로) 크기를 조절한 적이 있는지.
-// 한 번이라도 조절하면 그 뒤로는 전역/캐릭터와 별개로 독립적으로 기억한다.
 let chatHeightIsCustom = false;
-// 리사이즈 손잡이를 잡았을 수도 있는 후보 제스처의 "잡기 전" 높이. mouseup/touchend
-// 시점에 실제로 높이가 바뀌었는지 비교해서 "진짜 리사이즈였는지" 판단하는 데 쓴다.
 let resizeCandidateHeight = null;
-// 프리셋 줄은 채팅 탭에서 display:none으로 완전히 없어지므로, 그 높이를 팝업을
-// 열 때 한 번 측정해서 캐싱해둔다(채팅 탭이 그 공간만큼 textarea를 키우는 데 사용).
 let cachedPresetRowHeight = 0;
 
-// 지금 숨겨져 있어도(display:none) 잠깐 보이게 만들어서 실제 높이를 측정한다.
 function measurePresetRowHeight() {
     if (!compactUIPopup) return 0;
 
@@ -129,18 +115,11 @@ function measurePresetRowHeight() {
     return height;
 }
 
-// 팝업을 처음 열었을 때(유저가 아직 드래그로 리사이즈하기 전) textarea 기본 높이
 function defaultTextareaHeightPx() {
     return window.innerWidth <= 480 ? "130px" : "160px";
 }
 
-// 지금 스코프 그룹에 저장된 높이가 있으면 복원하고, 없으면 기본 높이로 되돌린다.
-// (팝업을 새로 열 때 + 스코프 탭을 전환할 때 공통으로 사용)
-//
-// 채팅 탭만 예외: 유저가 아직 채팅에서 직접 리사이즈한 적이 없으면, 전역/캐릭터
-// (shared) 높이 + 프리셋 줄 높이로 자동으로 맞춰서 팝업 총 높이가 같아 보이게
-// 한다(프리셋 줄이 없어진 자리를 입력칸이 채우는 셈). 한 번이라도 직접 리사이즈하면
-// 그 뒤로는 전역/캐릭터와 완전히 별개로(chatHeightIsCustom) 독립적으로 기억한다.
+// 채팅 탭은 직접 리사이즈한 적이 없으면 (공용 높이 + 프리셋 줄 높이)로 맞춰 팝업 크기를 동일하게 유지
 function restoreTextareaHeightForCurrentScope() {
     if (!compactUIPopup) return;
 
@@ -159,9 +138,7 @@ function restoreTextareaHeightForCurrentScope() {
     textarea[0].style.height = compactUITextareaHeights[group] || defaultTextareaHeightPx();
 }
 
-// 팝업을 열 때 딱 한 번만 textarea의 max-height를 계산해서 걸어준다.
-// 화면(뷰포트) 기준으로 계산하되, 이후 키보드가 열리고 닫혀도 다시 계산하지
-// 않는다 — 키보드 상태에 따라 크기가 바뀌는 것 자체가 버벅임의 원인이었기 때문.
+// 팝업을 열 때 한 번만 계산. 키보드 상태와 무관하게 screen.availHeight 기준.
 function applyTextareaHeightCap() {
     if (!compactUIPopup) return;
 
@@ -172,42 +149,105 @@ function applyTextareaHeightCap() {
     const header = compactUIPopup.find(".dm-compact--header");
     const scopeRow = compactUIPopup.find(".dm-compact--scope-row");
 
-    // 프리셋 줄은 채팅 탭에서 display:none이라 그 순간엔 측정할 수 없으므로,
-    // 팝업을 열 때 미리 캐싱해둔 값(cachedPresetRowHeight)을 항상 더해준다.
     const chromeHeight =
         (header.outerHeight(true) || 0) +
         (scopeRow.outerHeight(true) || 0) +
         cachedPresetRowHeight +
-        16; // 팝업 테두리 + content 패딩 여유분
+        16;
 
-    // window.innerHeight는 키보드가 열려 있으면 그만큼 줄어든 값이라, 팝업을 보통
-    // 그렇게(키보드가 이미 열린 채로) 열게 되는 이 UI 특성상 캡이 계속 작게 잡히는
-    // 문제가 있었다. 그래서 키보드 상태와 무관한 화면 자체 크기(screen.availHeight)를
-    // 기준으로 잡는다 — 키보드가 열려 있는 동안 캡 근처까지 늘리면 팝업 위쪽이
-    // 화면 밖으로 나갈 수 있지만, 키보드를 닫으면 바로 정상적으로 다 보인다.
     const viewportBasis = (window.screen && window.screen.availHeight) || window.innerHeight;
     const viewportBudget = viewportBasis * (window.innerWidth <= 480 ? 0.55 : 0.6);
     const maxTextareaHeight = Math.max(110, Math.round(viewportBudget - chromeHeight));
 
     textarea.css("max-height", `${maxTextareaHeight}px`);
 }
-// 현재 범위+플레이스홀더를 팝업에 불러온 시점의 content (이전 내용 추적용)
-let editSessionSnapshot = null;
-// ST 네이티브 Popup(확인/입력창)이 떠 있는 동안 true. 이 동안에는
-// "바깥 클릭시 팝업 닫기" 핸들러가 컴팩트 UI를 닫지 않도록 막는다.
+// 타이핑 도중(팝업이 최신 칸을 보고 있을 때) "이번 세션을 시작하기 전 내용"을 기억해둔다.
+// 팝업을 닫거나 범위를 바꿀 때, 이 스냅샷을 현재 칸 "바로 앞"에 끼워 넣어 새 기록으로 확정한다.
+// entries의 순서 자체는 절대 바뀌지 않는다 — 탐색은 activeIndex만 움직인다.
+let sessionSnapshot = null;
+
+function isMeaningfulHistoryText(text) {
+    return typeof text === "string" && text.replace(/\s/g, "").length >= HISTORY_MIN_CHARS;
+}
+
+function capEntries(entries) {
+    if (entries.length > HISTORY_TOTAL_MAX) {
+        entries.splice(0, entries.length - HISTORY_TOTAL_MAX);
+    }
+    return entries;
+}
+
+// 팝업을 열거나(스코프 전환 포함) ←/→로 위치를 옮긴 직후 호출: 지금 위치를 새 세션의 기준점으로 삼는다.
+function beginHistorySession(scopedValue) {
+    const lastIndex = scopedValue.entries.length - 1;
+    sessionSnapshot = scopedValue.activeIndex === lastIndex ? scopedValue.entries[lastIndex] : null;
+}
+
+// 팝업 닫기 / 범위 전환 직전: 세션 시작 시점 내용이 지금과 다르면 새 기록 한 칸으로 확정한다.
+function flushHistorySession() {
+    if (sessionSnapshot === null) return;
+
+    if (!compactUIPopup) {
+        sessionSnapshot = null;
+        return;
+    }
+
+    const placeholder = getPopupCurrentPlaceholder();
+    const scopedValue = getCurrentScopeState(placeholder.key);
+    const lastIndex = scopedValue.entries.length - 1;
+
+    if (scopedValue.activeIndex === lastIndex) {
+        const currentText = scopedValue.entries[lastIndex];
+
+        if (currentText !== sessionSnapshot && isMeaningfulHistoryText(sessionSnapshot)) {
+            scopedValue.entries.splice(lastIndex, 0, sessionSnapshot);
+            capEntries(scopedValue.entries);
+            scopedValue.activeIndex = scopedValue.entries.length - 1;
+            scopedValue.content = scopedValue.entries[scopedValue.activeIndex];
+
+            if (setCurrentScopeState(placeholder.key, scopedValue)) {
+                saveSettingsDebounced();
+            }
+        }
+    }
+
+    sessionSnapshot = null;
+}
+
+// ←/→: 목록 순서는 그대로 두고 보고 있는 위치(activeIndex)만 옮긴다. 이 위치는 저장되어
+// 팝업을 닫았다 다시 열어도 유지된다.
+function navigateHistory(direction) {
+    if (!compactUIPopup) return;
+
+    const placeholder = getPopupCurrentPlaceholder();
+    const scopedValue = getCurrentScopeState(placeholder.key);
+    const target = scopedValue.activeIndex + direction;
+
+    if (target < 0 || target >= scopedValue.entries.length) return;
+
+    scopedValue.activeIndex = target;
+    scopedValue.content = scopedValue.entries[target];
+
+    if (!setCurrentScopeState(placeholder.key, scopedValue)) {
+        console.warn(`${LOG_PREFIX} 현재 범위에 값을 저장하지 못했습니다.`);
+        return;
+    }
+
+    compactUIPopup.find(".dm-compact--textarea").val(scopedValue.content);
+    beginHistorySession(scopedValue);
+    applyPlaceholderToSystem(placeholder);
+    saveSettingsDebounced();
+    updateAppliedIndicator();
+}
+// ST 네이티브 Popup이 떠 있는 동안 true (바깥 클릭으로 컴팩트 UI가 닫히지 않게 함)
 let isNativePopupOpen = false;
-// 타이핑 중 매 키 입력마다 매크로를 재등록하면(registerMacro) 버벅일 수 있어서,
-// 입력이 잠시 멈췄을 때 한 번만 실제로 반영되도록 디바운스한다.
 let compactUIApplyDebounceTimer = null;
-// 확장 설정 패널에서 지금 편집 중인 프롬프트 탭 (전역/캐릭터/채팅)
 let promptEditorScope = "global";
 
-// 플레이스홀더 정의
 const placeholders = [
     { key: "direction", name: "🪄전개지시M", isCustom: true },
 ];
 
-// 컴팩트 UI 관련 변수들
 let compactUIButton = null;
 let compactUIPopup = null;
 
@@ -221,10 +261,36 @@ function getSettings() {
 }
 
 function sanitizePlaceholderValue(value) {
+    let entries;
+
+    if (Array.isArray(value?.entries) && value.entries.length) {
+        entries = value.entries.filter((item) => typeof item === "string");
+    } else {
+        // 구버전({content, history} 또는 {content, previousContent}) 호환:
+        // 예전 history는 "현재 내용 제외, 오래된 것 → 최신" 순서였으므로 그대로 앞에 붙이고
+        // content를 맨 뒤(최신)에 둔다.
+        let oldHistory = [];
+
+        if (Array.isArray(value?.history)) {
+            oldHistory = value.history.filter((item) => typeof item === "string" && item).slice(-HISTORY_MAX);
+        } else if (typeof value?.previousContent === "string" && value.previousContent) {
+            oldHistory = [value.previousContent];
+        }
+
+        entries = [...oldHistory, typeof value?.content === "string" ? value.content : ""];
+    }
+
+    if (!entries.length) entries = [""];
+    capEntries(entries);
+
+    let activeIndex = Number.isInteger(value?.activeIndex) ? value.activeIndex : entries.length - 1;
+    activeIndex = Math.min(Math.max(activeIndex, 0), entries.length - 1);
+
     return {
         enabled: Boolean(value?.enabled),
-        content: typeof value?.content === "string" ? value.content : "",
-        previousContent: typeof value?.previousContent === "string" ? value.previousContent : "",
+        entries,
+        activeIndex,
+        content: entries[activeIndex],
     };
 }
 
@@ -247,7 +313,6 @@ function sanitizePresetList(arr) {
         : [];
 }
 
-// 프리셋을 전역/캐릭터/채팅 범위별로 분리해서 저장
 function sanitizeScopePresets(scopePresets) {
     const src = scopePresets || {};
 
@@ -270,51 +335,26 @@ function pruneRemovedPlaceholders() {
     const settings = getSettings();
     let changed = false;
 
-    const pruneScope = (scopeState) => {
-        if (!scopeState || typeof scopeState !== "object") return;
+    const dropLegacyKeys = (obj) => {
+        if (!obj || typeof obj !== "object") return;
 
-        if ("char" in scopeState) {
-            delete scopeState.char;
-            changed = true;
-        }
-
-        if ("user" in scopeState) {
-            delete scopeState.user;
-            changed = true;
-        }
+        ["char", "user"].forEach((key) => {
+            if (key in obj) {
+                delete obj[key];
+                changed = true;
+            }
+        });
     };
 
-    pruneScope(settings.global);
-
-    Object.values(settings.chars || {}).forEach(pruneScope);
-    Object.values(settings.chats || {}).forEach(pruneScope);
-
-    if (settings.presets && typeof settings.presets === "object") {
-        if ("char" in settings.presets) {
-            delete settings.presets.char;
-            changed = true;
-        }
-
-        if ("user" in settings.presets) {
-            delete settings.presets.user;
-            changed = true;
-        }
-    }
-
-    if ("char" in settings) {
-        delete settings.char;
-        changed = true;
-    }
-
-    if ("user" in settings) {
-        delete settings.user;
-        changed = true;
-    }
+    dropLegacyKeys(settings.global);
+    Object.values(settings.chars || {}).forEach(dropLegacyKeys);
+    Object.values(settings.chats || {}).forEach(dropLegacyKeys);
+    dropLegacyKeys(settings.presets);
+    dropLegacyKeys(settings);
 
     return changed;
 }
 
-// 구버전엔 promptDepth가 숫자 하나였음 -> 전역/캐릭터/채팅 세 범위 모두에 그 값을 복사
 function normalizePromptDepth(raw) {
     if (Number.isInteger(raw)) {
         return { global: raw, char: raw, chat: raw };
@@ -334,8 +374,6 @@ function getScopeDepth(scope) {
     return Number.isInteger(depth?.[scope]) ? depth[scope] : 1;
 }
 
-// directionPrompt는 이제 범위별(전역/캐릭터/채팅) 템플릿 객체다. 값이 없거나 잘못돼 있으면
-// 그 범위의 기본 템플릿으로 채운다.
 function normalizeDirectionPromptObject(raw) {
     const src = raw && typeof raw === "object" ? raw : {};
 
@@ -350,7 +388,6 @@ function isGroupContext(context) {
     return Boolean(context?.groupId ?? context?.selected_group ?? context?.group?.id ?? context?.is_group);
 }
 
-// 캐릭터 카드 자체를 가리키는 원시 키 (아바타 파일명). "채팅 단위" 키를 만들 때 내부적으로만 사용한다.
 function getCharAvatarKey() {
     const context = getContext();
 
@@ -365,9 +402,6 @@ function getCharAvatarKey() {
     return null;
 }
 
-// "캐릭터" 범위는 캐릭터 전체가 아니라, 채팅(chat) 범위처럼 지금 열려 있는
-// 채팅방 안에서만 적용되어야 한다. 그래서 저장 키도 채팅 키와 동일하게 맞춘다.
-// (저장소는 chars / chats 로 여전히 분리되어 있으므로 값이 섞이지는 않는다)
 function getCurrentCharKey() {
     return getCurrentChatKey();
 }
@@ -423,15 +457,6 @@ function getScopeAvailability(scope) {
         return { available: true, reason: "" };
     }
 
-    // "캐릭터" 범위도 이제 채팅 범위와 마찬가지로 현재 채팅방이 있어야 사용 가능하다.
-    if (scope === "char") {
-        if (!getCurrentCharKey()) {
-            return { available: false, reason: "현재 채팅을 찾을 수 없습니다" };
-        }
-
-        return { available: true, reason: "" };
-    }
-
     if (!getCurrentChatKey()) {
         return { available: false, reason: "현재 채팅을 찾을 수 없습니다" };
     }
@@ -449,7 +474,7 @@ function normalizeSettings() {
     settings.extensionEnabled = typeof settings.extensionEnabled === "boolean" ? settings.extensionEnabled : defaultSettings.extensionEnabled;
     settings.directionPrompt = normalizeDirectionPromptObject(settings.directionPrompt);
     settings.promptDepth = normalizePromptDepth(settings.promptDepth);
-    settings.lastScope = ["global", "char", "chat"].includes(settings.lastScope) ? settings.lastScope : "chat";
+    settings.lastScope = SCOPE_ORDER.includes(settings.lastScope) ? settings.lastScope : "chat";
     settings._migratedV2 = Boolean(settings._migratedV2);
     settings._migratedV3 = Boolean(settings._migratedV3);
     settings._migratedV4 = Boolean(settings._migratedV4);
@@ -485,22 +510,15 @@ function migrateV1SettingsIfNeeded() {
         delete settings.direction;
     }
 
-    // v1에 있던 {{char}} / {{user}} 저장값은 더 이상 사용하지 않으므로 삭제
-    if (settings.char !== undefined) {
-        delete settings.char;
-    }
-
-    if (settings.user !== undefined) {
-        delete settings.user;
-    }
+    delete settings.char;
+    delete settings.user;
 
     settings._migratedV2 = true;
     console.log(`${LOG_PREFIX} v1 설정을 v2 global 스코프로 마이그레이션했습니다. {{char}}/{{user}} 값은 제거했습니다.`);
     return true;
 }
 
-// v2까지는 프리셋이 스코프 구분 없이 하나의 목록이었음 -> 전역/캐릭터/채팅 3분할로 이전
-// (기존 프리셋을 잃지 않도록 세 범위 모두에 복사해 넣음)
+// v2까지 프리셋은 범위 구분 없이 하나 → 세 범위 모두에 복사
 function migrateV3PresetsIfNeeded() {
     const settings = getSettings();
 
@@ -532,10 +550,7 @@ function migrateV3PresetsIfNeeded() {
     return true;
 }
 
-// v3까지 "캐릭터" 범위는 캐릭터 카드 전체(모든 채팅방 공용)로 저장되었다.
-// v4부터는 채팅방 단위로 바뀌었는데, 예전 값은 "그 캐릭터의 어느 채팅방에서 썼는지"
-// 기록이 없어(원래 모든 채팅방이 같은 값을 공유했음) 특정 채팅방으로 옮겨줄 수가 없다.
-// 그래서 예전 형식(키에 "::"가 없는, 아바타 파일명만 있는 캐릭터 범위 데이터)은 정리한다.
+// v3까지 캐릭터 범위는 캐릭터 카드 단위로 저장됨 → v4부터 채팅 단위. 옮길 방법이 없어 예전 데이터 정리
 function migrateV4LegacyCharScopeIfNeeded() {
     const settings = getSettings();
 
@@ -561,10 +576,7 @@ function migrateV4LegacyCharScopeIfNeeded() {
     return true;
 }
 
-// v4까지는 프롬프트 템플릿이 문자열 하나였고, 모든 범위가 그 템플릿을 그대로 반복해서 썼다.
-// v5부터는 범위별로 완전히 다른 템플릿을 쓴다. 예전에 직접 고쳐 썼던 프롬프트가 있으면
-// (기본값과 다르면) "채팅" 범위 것으로 그대로 옮겨준다 — 원래 이 문구 자체가
-// "다음 채팅 지시"용으로 쓰여진 것이었기 때문이다. 전역/캐릭터는 새 기본 템플릿을 받는다.
+// v4까지 프롬프트는 문자열 하나 → 범위별 객체로 변경. 커스텀했던 값은 "채팅" 범위로 이전
 function migrateV5DirectionPromptIfNeeded() {
     const settings = getSettings();
 
@@ -587,7 +599,6 @@ function migrateV5DirectionPromptIfNeeded() {
     return true;
 }
 
-// 설정 로드
 async function loadSettings() {
     const settings = getSettings();
 
@@ -611,7 +622,6 @@ function ensureScopedSettings(scope) {
     const settings = getSettings();
 
     if (scope === "global") {
-        settings.global = settings.global || defaultScopeState();
         settings.global = sanitizeScopeState(settings.global);
         return settings.global;
     }
@@ -657,8 +667,6 @@ function isValidEnabledContent(value) {
     return Boolean(value?.enabled && typeof value?.content === "string" && value.content.trim() !== "");
 }
 
-// 전역/캐릭터/채팅 중 활성화되어 있고 내용이 있는 범위를 전부 모아서
-// 라벨을 붙여 하나의 문자열로 합친다 (폴백이 아니라 동시 적용)
 function resolveCombinedContent(placeholderKey) {
     const parts = [];
     const activeScopes = [];
@@ -678,8 +686,6 @@ function resolveCombinedContent(placeholderKey) {
     };
 }
 
-// 플레이스홀더를 시스템에 적용
-// 대기 중인 디바운스를 취소하고, 지금 즉시 시스템(매크로)에 반영 + 표시 갱신
 function commitDirectionContentNow(placeholder) {
     clearTimeout(compactUIApplyDebounceTimer);
     compactUIApplyDebounceTimer = null;
@@ -690,7 +696,7 @@ function commitDirectionContentNow(placeholder) {
 function applyPlaceholderToSystem(placeholder) {
     const combined = resolveCombinedContent(placeholder.key);
 
-    if (activeScopesEmpty(combined)) {
+    if (combined.activeScopes.length === 0) {
         removePlaceholderFromSystem(placeholder.key);
         return;
     }
@@ -698,17 +704,11 @@ function applyPlaceholderToSystem(placeholder) {
     registerCustomPlaceholder(placeholder.key, combined.content);
 }
 
-function activeScopesEmpty(combined) {
-    return !combined || !combined.activeScopes || combined.activeScopes.length === 0;
-}
-
-// 커스텀 플레이스홀더 등록
 function registerCustomPlaceholder(key, content) {
     try {
         const context = getContext();
 
         if (context && context.registerMacro) {
-            // 기존 매크로가 있으면 먼저 제거
             if (context.unregisterMacro) {
                 context.unregisterMacro(key);
             }
@@ -720,7 +720,6 @@ function registerCustomPlaceholder(key, content) {
     }
 }
 
-// 시스템에서 플레이스홀더 제거
 function removePlaceholderFromSystem(key) {
     try {
         const context = getContext();
@@ -733,14 +732,12 @@ function removePlaceholderFromSystem(key) {
     }
 }
 
-// 모든 플레이스홀더 적용
 function applyAllPlaceholders() {
     placeholders.forEach((placeholder) => {
         applyPlaceholderToSystem(placeholder);
     });
 }
 
-// 모든 플레이스홀더 제거
 function removeAllPlaceholders() {
     placeholders.forEach((placeholder) => {
         removePlaceholderFromSystem(placeholder.key);
@@ -789,7 +786,6 @@ function ensureUsableCurrentScope() {
         return;
     }
 
-    // 지금 범위를 못 쓰면 채팅 > 캐릭터 > 전역 순으로 사용 가능한 범위를 찾는다.
     const fallbackOrder = ["chat", "char", "global"];
 
     for (const scope of fallbackOrder) {
@@ -807,7 +803,7 @@ function ensureUsableCurrentScope() {
 function refreshScopeButtons() {
     if (!compactUIPopup) return;
 
-    ["global", "char", "chat"].forEach((scope) => {
+    SCOPE_ORDER.forEach((scope) => {
         const btn = compactUIPopup.find(`.dm-compact--scope-btn[data-scope="${scope}"]`);
         const availability = getScopeAvailability(scope);
         btn.prop("disabled", !availability.available);
@@ -816,15 +812,17 @@ function refreshScopeButtons() {
     });
 }
 
-// 이전/현재 내용 토글 버튼: 이 범위에 "이전 내용"이 없으면 비활성화
 function refreshHistoryButtons() {
     if (!compactUIPopup) return;
 
     const placeholder = getPopupCurrentPlaceholder();
     const scopedValue = getCurrentScopeState(placeholder.key);
-    const hasPrevious = Boolean(scopedValue.previousContent);
+    const total = scopedValue.entries.length;
+    const idx = scopedValue.activeIndex;
 
-    compactUIPopup.find(".dm-compact--history-prev, .dm-compact--history-next").prop("disabled", !hasPrevious);
+    compactUIPopup.find(".dm-compact--history-prev").prop("disabled", idx <= 0);
+    compactUIPopup.find(".dm-compact--history-next").prop("disabled", idx >= total - 1);
+    compactUIPopup.find(".dm-compact--history-count").text(`${idx + 1}/${total}`);
 }
 
 function getPresetList(placeholderKey, scope) {
@@ -839,8 +837,6 @@ function renderPresetSelect() {
     const placeholder = getPopupCurrentPlaceholder();
     const select = compactUIPopup.find(".dm-compact--preset-select");
     const presets = getPresetList(placeholder.key, currentScope);
-    // 현재 범위에 적용되어 있는 내용과 똑같은 프리셋이 있으면
-    // (재적용/재접속 시에도) 그 프리셋이 선택된 상태로 보여준다.
     const currentContent = getCurrentScopeState(placeholder.key).content;
 
     select.empty();
@@ -863,15 +859,12 @@ function renderPresetSelect() {
     compactUIPopup.find(".dm-compact--preset-delete").prop("disabled", !hasSelection);
 }
 
-// "이 범위가 켜져 있고 실제로 적용 중인 내용이 있는지"를 스코프 버튼
-// (이모지 채도 + 글자색)으로 표시한다. 예전엔 별도 줄(🟢활성: ...)로 텍스트
-// 표시했지만, 그 줄 자체를 없애고 각 스코프 버튼에 상태를 얹는 방식으로 옮겼다.
 function updateAppliedIndicator() {
     if (!compactUIPopup) return;
 
     const placeholder = getPopupCurrentPlaceholder();
     const combined = resolveCombinedContent(placeholder.key);
-    const activeScopes = new Set(activeScopesEmpty(combined) ? [] : combined.activeScopes);
+    const activeScopes = new Set(combined.activeScopes);
 
     SCOPE_ORDER.forEach((scope) => {
         compactUIPopup
@@ -889,7 +882,7 @@ function syncPopupByCurrentState() {
 
     const currentPlaceholder = getPopupCurrentPlaceholder();
     const settings = getCurrentScopeState(currentPlaceholder.key);
-    editSessionSnapshot = settings.content;
+    beginHistorySession(settings);
 
     compactUIPopup.find(".dm-compact--radio").prop("checked", settings.enabled);
     compactUIPopup
@@ -897,8 +890,6 @@ function syncPopupByCurrentState() {
         .val(settings.content || "")
         .prop("disabled", !settings.enabled);
 
-    // 채팅 범위는 프리셋을 쓸 일이 없으므로 프리셋 줄을 숨기고, 그만큼의 공간을
-    // 입력칸(textarea)을 늘리는 데 쓴다. 팝업 자체 크기는 세 범위 모두 동일하게 유지된다.
     compactUIPopup.toggleClass("dm-compact--hide-preset", currentScope === "chat");
 
     refreshScopeButtons();
@@ -914,8 +905,6 @@ function generatePresetId() {
     return `${Date.now()}-${Math.random()}`;
 }
 
-// ST 네이티브 확인창을 띄우는 동안 isNativePopupOpen을 true로 유지한다.
-// (바깥 클릭시 컴팩트 UI가 같이 닫히는 문제 방지)
 async function showNativeConfirm(header, text, popupOptions = {}) {
     isNativePopupOpen = true;
 
@@ -945,12 +934,12 @@ function escapeHtml(value) {
         .replace(/'/g, "&#39;");
 }
 
-// 컴팩트 UI 팝업 닫기
 function closeCompactUIPopup() {
-    // 팝업을 닫는 시점에 아직 반영 안 된(디바운스 대기중인) 입력이 있으면 지금 바로 반영
     if (compactUIApplyDebounceTimer) {
         commitDirectionContentNow(getPopupCurrentPlaceholder());
     }
+
+    flushHistorySession();
 
     if (compactUIPopup) {
         compactUIPopup.removeClass("dm-compact--active");
@@ -964,10 +953,7 @@ function closeCompactUIPopup() {
     }
 
     if (compactUIButton) {
-        // 클래스 대신 속성으로 표시: 서드파티 UI 커스텀 스크립트(예: 재단사)가
-        // 버튼 classList를 기반으로 고유 키를 계산하는 경우, 클래스가 늘었다 줄었다
-        // 하면 팝업 열림/닫힘에 따라 다른 버튼으로 인식되어 저장된 위치 설정이
-        // 초기화되는 문제가 생길 수 있다. data 속성은 그런 키 계산에 영향을 주지 않는다.
+        // class 대신 data 속성 사용: 서드파티 UI 스크립트가 classList로 버튼을 식별하는 경우 위치 설정이 초기화되는 것을 방지
         compactUIButton.removeAttr("data-dm-popup-open");
     }
 
@@ -975,14 +961,12 @@ function closeCompactUIPopup() {
     $(document).off("mouseup.dmResize touchend.dmResize");
 }
 
-// 컴팩트 UI 팝업 표시
 function showCompactUIPopup() {
     if (compactUIPopup) {
         return closeCompactUIPopup();
     }
 
     const settings = getSettings();
-    // 마지막으로 보고 있던 범위 탭을 그대로 복원 (없으면 채팅 범위)
     currentScope = settings.lastScope || "chat";
     ensureUsableCurrentScope();
 
@@ -997,7 +981,8 @@ function showCompactUIPopup() {
                 <button class="dm-compact--history-btn dm-compact--history-prev" type="button" title="이전 내용 보기">
                     <i class="fa-solid fa-arrow-left"></i>
                 </button>
-                <button class="dm-compact--history-btn dm-compact--history-next" type="button" title="현재 내용 보기">
+                <span class="dm-compact--history-count"></span>
+                <button class="dm-compact--history-btn dm-compact--history-next" type="button" title="다음 내용 보기">
                     <i class="fa-solid fa-arrow-right"></i>
                 </button>
                 <button class="dm-compact--nav dm-compact--clear" title="내용 지우기" type="button">
@@ -1033,35 +1018,25 @@ function showCompactUIPopup() {
     compactUIPopup = $(popupHtml);
     $("#nonQRFormItems").append(compactUIPopup);
 
-    // 애니메이션
     setTimeout(() => {
         if (compactUIPopup) {
             compactUIPopup.addClass("dm-compact--active");
         }
     }, 10);
 
-    // 이벤트 핸들러 설정
     setupCompactUIEventListeners();
     syncPopupByCurrentState();
 
-    // textarea 기본/복원 높이 적용 + 화면을 벗어나지 않도록 상한선을 딱 한 번 계산
-    // (이후 키보드가 열리고 닫혀도 다시 계산하지 않음 — 그게 버벅임의 원인이었음)
     cachedPresetRowHeight = measurePresetRowHeight();
     restoreTextareaHeightForCurrentScope();
     applyTextareaHeightCap();
 }
 
-// 컴팩트 UI 이벤트 리스너 설정
 function setupCompactUIEventListeners() {
     if (!compactUIPopup) return;
 
-    // 스코프 탭 / 이전·다음 내용 / 지우개 버튼을 누를 때 textarea가 blur되어
-    // 키보드가 닫히지 않게 한다. 주의: touchstart에서 preventDefault()를 호출하면
-    // 브라우저가 그 터치에 대해 뒤따르는 click(마우스 호환 이벤트) 자체를 아예
-    // 만들어주지 않는다 — 그래서 버튼이 안 눌리는 것처럼 보였다. 그래서 여기서는
-    // touchstart 시점에 preventDefault로 blur만 막고, 실제 동작(handler)도 그
-    // 자리에서 바로 실행한 뒤 뒤이어 오는 click은 무시한다(중복 실행 방지).
-    // 마우스 환경에서는 touchstart가 없으니 click이 정상적으로 그대로 쓰인다.
+    // touchstart에서 preventDefault로 textarea blur(키보드 닫힘)를 막고 핸들러를 직접 실행한 뒤,
+    // 뒤따르는 click은 무시한다(중복 실행 방지). 마우스 환경에서는 click만 사용된다.
     function bindTapAction(selector, handler) {
         let suppressNextClick = false;
 
@@ -1069,10 +1044,6 @@ function setupCompactUIEventListeners() {
             if ($(this).prop("disabled")) return;
             e.preventDefault();
             suppressNextClick = true;
-            // 대부분의 모바일 브라우저는 touchstart에서 preventDefault를 부르면
-            // 뒤따르는 click을 아예 안 만들어주지만(그래서 여기서 직접 실행),
-            // 일부 환경(마우스도 같이 붙어있는 하이브리드 기기 등)에서 click이
-            // 그래도 올 수 있어 짧은 시간 후 자동으로 플래그를 풀어준다.
             setTimeout(() => { suppressNextClick = false; }, 400);
             handler.call(this, e);
         });
@@ -1098,7 +1069,8 @@ function setupCompactUIEventListeners() {
             return;
         }
 
-        // 벗어나는 스코프가 속한 그룹의 지금 입력칸 높이를 기억해둔다.
+        flushHistorySession();
+
         const textarea = compactUIPopup.find(".dm-compact--textarea");
         const outgoingGroup = textareaHeightGroup(currentScope);
         compactUITextareaHeights[outgoingGroup] = textarea.length ? textarea[0].style.height : "";
@@ -1108,40 +1080,12 @@ function setupCompactUIEventListeners() {
         saveSettingsDebounced();
         syncPopupByCurrentState();
 
-        // 전환해 들어온 스코프가 속한 그룹의 높이를 복원 (없으면 기본 크기로 돌아감)
         restoreTextareaHeightForCurrentScope();
     });
 
-    // 이전 내용 <-> 현재 내용 토글 (두 버튼 모두 동일하게 내용을 맞바꿈)
-    bindTapAction(".dm-compact--history-prev, .dm-compact--history-next", function () {
-        const placeholder = getPopupCurrentPlaceholder();
-        const scopedValue = getCurrentScopeState(placeholder.key);
+    bindTapAction(".dm-compact--history-prev", () => navigateHistory(-1));
+    bindTapAction(".dm-compact--history-next", () => navigateHistory(1));
 
-        if (!scopedValue.previousContent) {
-            toastr.info("이 범위에 저장된 이전 내용이 없습니다.");
-            return;
-        }
-
-        const swapped = {
-            enabled: scopedValue.enabled,
-            content: scopedValue.previousContent,
-            previousContent: scopedValue.content,
-        };
-
-        if (!setCurrentScopeState(placeholder.key, swapped)) {
-            console.warn(`${LOG_PREFIX} 현재 범위에 값을 저장하지 못했습니다.`);
-            return;
-        }
-
-        compactUIPopup.find(".dm-compact--textarea").val(swapped.content);
-        editSessionSnapshot = swapped.content;
-
-        applyPlaceholderToSystem(placeholder);
-        saveSettingsDebounced();
-        updateAppliedIndicator();
-    });
-
-    // 라디오 버튼 변경 이벤트
     compactUIPopup.find(".dm-compact--radio").on("change", function () {
         const isEnabled = $(this).is(":checked");
         const currentPlaceholder = getPopupCurrentPlaceholder();
@@ -1153,7 +1097,6 @@ function setupCompactUIEventListeners() {
             return;
         }
 
-        // 텍스트에어리어 활성화/비활성화
         const textarea = compactUIPopup.find(".dm-compact--textarea");
         textarea.prop("disabled", !isEnabled);
 
@@ -1162,10 +1105,7 @@ function setupCompactUIEventListeners() {
         updateAppliedIndicator();
     });
 
-    // 체크박스(스코프 켜기/끄기)도 터치로 누르면 blur→키보드 닫힘이 발생했다.
-    // 체크박스는 클릭 시 브라우저가 checked를 뒤집고 "change"를 쏘는 방식이라,
-    // touchstart에서 preventDefault로 그 흐름 자체를 막은 뒤 우리가 직접
-    // checked를 뒤집고 change를 수동으로 발생시켜 위 로직을 그대로 재사용한다.
+    // 체크박스도 터치 시 키보드가 닫히므로 직접 토글하고 change를 발생시킨다.
     compactUIPopup.on("touchstart", ".dm-compact--radio", function (e) {
         e.preventDefault();
         const checkbox = $(this);
@@ -1176,11 +1116,7 @@ function setupCompactUIEventListeners() {
         e.preventDefault();
     });
 
-    // 채팅 탭에서 유저가 textarea 리사이즈 손잡이(우하단 모서리)를 실제로 드래그해서
-    // 크기를 바꿨는지 감지한다. 이미 커스텀 크기로 넘어갔거나 채팅 탭이 아니면 무시.
-    // "잡은 지점이 모서리 근처였는지"만으로는 오탐(그냥 텍스트 커서 놓으려고 모서리
-    // 근처를 탭한 경우)이 생길 수 있어서, mouseup/touchend 때 실제로 높이가
-    // 바뀌었는지까지 확인한 뒤에만 커스텀으로 인정한다.
+    // 채팅 탭에서 리사이즈 손잡이를 실제로 드래그했는지 감지 (모서리 근처 터치 + 높이 변화 둘 다 확인)
     compactUIPopup.on("mousedown touchstart", ".dm-compact--textarea", function (e) {
         if (currentScope !== "chat" || chatHeightIsCustom) {
             resizeCandidateHeight = null;
@@ -1206,16 +1142,16 @@ function setupCompactUIEventListeners() {
         resizeCandidateHeight = null;
     });
 
-    // 지우개 버튼: 확인창 없이 바로 삭제 (지우기 전 내용은 이전 내용으로 남아 화살표로 복원 가능)
     bindTapAction(".dm-compact--clear", function () {
         const currentPlaceholder = getPopupCurrentPlaceholder();
         const scopedValue = getCurrentScopeState(currentPlaceholder.key);
 
-        if (scopedValue.content) {
-            scopedValue.previousContent = scopedValue.content;
-        }
-
+        // 지금 목록 순서는 그대로 두고, 맨 뒤에 빈 칸을 새로 추가해서 그 칸으로 이동한다.
+        scopedValue.entries.push("");
+        capEntries(scopedValue.entries);
+        scopedValue.activeIndex = scopedValue.entries.length - 1;
         scopedValue.content = "";
+        sessionSnapshot = null;
 
         if (!setCurrentScopeState(currentPlaceholder.key, scopedValue)) {
             console.warn(`${LOG_PREFIX} 현재 범위에 값을 저장하지 못했습니다.`);
@@ -1223,33 +1159,35 @@ function setupCompactUIEventListeners() {
         }
 
         compactUIPopup.find(".dm-compact--textarea").val("");
-        editSessionSnapshot = "";
         applyPlaceholderToSystem(currentPlaceholder);
         saveSettingsDebounced();
         updateAppliedIndicator();
     });
 
-    // 텍스트에어리어 변경 이벤트
     compactUIPopup.find(".dm-compact--textarea").on("input", function () {
         const newContent = String($(this).val());
         const currentPlaceholder = getPopupCurrentPlaceholder();
         const scopedValue = getCurrentScopeState(currentPlaceholder.key);
+        const lastIndex = scopedValue.entries.length - 1;
 
-        // 이 편집 세션에서 처음으로 내용이 바뀌는 순간의 "이전 내용"을 1회만 보존
-        if (editSessionSnapshot !== null && editSessionSnapshot !== newContent) {
-            scopedValue.previousContent = editSessionSnapshot;
-            editSessionSnapshot = null;
+        if (scopedValue.activeIndex !== lastIndex) {
+            // 이전 칸을 보다가 수정: 기존 항목들은 그대로 두고 맨 뒤에 새 칸으로 분기한다.
+            scopedValue.entries.push(newContent);
+            capEntries(scopedValue.entries);
+            scopedValue.activeIndex = scopedValue.entries.length - 1;
+            sessionSnapshot = null;
+        } else {
+            scopedValue.entries[lastIndex] = newContent;
         }
 
-        scopedValue.content = newContent;
+        scopedValue.content = scopedValue.entries[scopedValue.activeIndex];
 
         if (!setCurrentScopeState(currentPlaceholder.key, scopedValue)) {
             console.warn(`${LOG_PREFIX} 현재 범위에 값을 저장하지 못했습니다.`);
             return;
         }
 
-        // registerMacro/unregisterMacro는 비용이 있는 작업이라 매 키 입력마다 실행하면
-        // (특히 모바일에서) 타이핑이 버벅일 수 있다. 입력이 250ms 멈췄을 때만 반영한다.
+        // 매크로 재등록은 비용이 커서 입력이 250ms 멈췄을 때만 반영
         clearTimeout(compactUIApplyDebounceTimer);
         compactUIApplyDebounceTimer = setTimeout(() => {
             commitDirectionContentNow(currentPlaceholder);
@@ -1273,7 +1211,6 @@ function setupCompactUIEventListeners() {
         }
 
         compactUIPopup.find(".dm-compact--textarea").val(selectedPreset.content).trigger("input");
-        // 프리셋 선택은 타이핑이 아니라 즉시 반영되어야 자연스러우므로 디바운스를 건너뛴다.
         commitDirectionContentNow(getPopupCurrentPlaceholder());
     });
 
@@ -1288,8 +1225,6 @@ function setupCompactUIEventListeners() {
         const presets = settings.presets[placeholder.key][currentScope];
         const selectedPreset = selectedPresetId ? presets.find((preset) => preset.id === selectedPresetId) : null;
 
-        // 이미 선택된 프리셋이 있으면 새로 저장할지, 그 프리셋을 덮어쓸지 먼저 확인
-        // (ST 자체 Popup 사용: 네이티브 confirm()은 모바일에서 키보드가 열렸다 닫히는 듯한 리플로우를 유발함)
         if (selectedPreset) {
             const overwrite = await showNativeConfirm(
                 "프리셋 덮어쓰기",
@@ -1348,8 +1283,6 @@ function setupCompactUIEventListeners() {
 
         target.name = newName.trim();
 
-        const settings = getSettings();
-        settings.presets[placeholder.key][currentScope] = presets;
         saveSettingsDebounced();
         renderPresetSelect();
         compactUIPopup.find(`.dm-compact--preset-select option[value="${presetId}"]`).prop("selected", true);
@@ -1380,7 +1313,6 @@ function setupCompactUIEventListeners() {
         renderPresetSelect();
     });
 
-    // 외부 클릭시 닫기 (단, ST 네이티브 확인/입력창이 떠 있는 동안은 무시)
     $(document).on("click.compactUI", (e) => {
         if (isNativePopupOpen) {
             return;
@@ -1400,7 +1332,6 @@ function refreshPopupIfOpened() {
     syncPopupByCurrentState();
 }
 
-// 컴팩트 UI 버튼 추가
 function addCompactUIButton() {
     const ta = document.querySelector("#send_textarea");
 
@@ -1409,7 +1340,6 @@ function addCompactUIButton() {
         return;
     }
 
-    // 기존 버튼 제거
     if (compactUIButton) {
         compactUIButton.remove();
         compactUIButton = null;
@@ -1424,7 +1354,6 @@ function addCompactUIButton() {
     compactUIButton = $(buttonHtml);
     $(ta).after(compactUIButton);
 
-    // 확장 활성화 상태에 따라 버튼 표시/숨김
     const settings = getSettings();
 
     if (settings && settings.extensionEnabled) {
@@ -1433,21 +1362,16 @@ function addCompactUIButton() {
         compactUIButton.hide();
     }
 
-    // 클릭 이벤트
     compactUIButton.on("click", showCompactUIPopup);
 }
 
-// 확장 메뉴 초기화
 async function initializeExtensionMenu() {
     try {
-        // HTML 로드 및 삽입
         const html = await $.get(`/scripts/extensions/third-party/${extensionName}/settings.html`);
         $("#extensions_settings").append(html);
 
-        // UI 업데이트
         updateExtensionMenuUI();
 
-        // 이벤트 핸들러 설정
         setupExtensionMenuEventHandlers();
 
         console.log(`${LOG_PREFIX} 확장 메뉴 초기화 완료`);
@@ -1456,22 +1380,18 @@ async function initializeExtensionMenu() {
     }
 }
 
-// 확장 메뉴 UI 업데이트
 function updateExtensionMenuUI() {
     const settings = getSettings();
     const prompts = normalizeDirectionPromptObject(settings.directionPrompt);
 
-    // 활성화 체크박스 상태 설정
     $("#direction_manager_enabled").prop("checked", settings.extensionEnabled);
 
-    // 프롬프트 탭(전역/캐릭터/채팅) 활성 표시 + 지금 선택된 탭의 프롬프트 내용 표시
     $(".dm-prompt-tab-btn")
         .removeClass("dm-prompt-tab-btn--active")
         .filter(`[data-scope="${promptEditorScope}"]`)
         .addClass("dm-prompt-tab-btn--active");
     $("#direction_prompt_text").val(prompts[promptEditorScope] ?? "");
 
-    // 범위별 Depth 설정
     $("#direction_prompt_depth_global").val(settings.promptDepth?.global ?? 1);
     $("#direction_prompt_depth_char").val(settings.promptDepth?.char ?? 1);
     $("#direction_prompt_depth_chat").val(settings.promptDepth?.chat ?? 1);
@@ -1519,26 +1439,21 @@ async function clearCurrentChatScopeData() {
     refreshPopupIfOpened();
 }
 
-// 확장 메뉴 이벤트 핸들러 설정
 function setupExtensionMenuEventHandlers() {
-    // 활성화 체크박스 변경 이벤트 (전체 확장 기능 제어)
     $("#direction_manager_enabled").on("change", function () {
         const isEnabled = $(this).is(":checked");
         getSettings().extensionEnabled = isEnabled;
 
         if (isEnabled) {
-            // 확장 활성화 시: 컴팩트 UI 버튼 표시 및 모든 플레이스홀더 적용
             if (compactUIButton) {
                 compactUIButton.show();
             }
 
             applyAllPlaceholders();
         } else {
-            // 확장 비활성화 시: 컴팩트 UI 버튼 숨김 및 모든 매크로 제거
             if (compactUIButton) {
                 compactUIButton.hide();
 
-                // 팝업이 열려있으면 닫기
                 if (compactUIPopup) {
                     closeCompactUIPopup();
                 }
@@ -1550,13 +1465,11 @@ function setupExtensionMenuEventHandlers() {
         saveSettingsDebounced();
     });
 
-    // 프롬프트 탭(전역/캐릭터/채팅) 전환 이벤트
     $(".dm-prompt-tab-btn").on("click", function () {
         promptEditorScope = String($(this).data("scope"));
         updateExtensionMenuUI();
     });
 
-    // 프롬프트 텍스트 변경 이벤트 (실시간 저장, 지금 선택된 탭에만 저장)
     $("#direction_prompt_text").on("input", function () {
         const settings = getSettings();
         settings.directionPrompt = normalizeDirectionPromptObject(settings.directionPrompt);
@@ -1564,7 +1477,6 @@ function setupExtensionMenuEventHandlers() {
         saveSettingsDebounced();
     });
 
-    // 범위별 Depth 설정 변경 이벤트
     const bindScopeDepthInput = (scope, elementId) => {
         $(elementId).on("input", function () {
             const value = parseInt(String($(this).val()), 10);
@@ -1579,7 +1491,6 @@ function setupExtensionMenuEventHandlers() {
     bindScopeDepthInput("char", "#direction_prompt_depth_char");
     bindScopeDepthInput("chat", "#direction_prompt_depth_chat");
 
-    // 기본값 초기화 버튼 (세 범위 프롬프트 + Depth 전부 기본값으로)
     $("#direction_reset_prompt").on("click", function () {
         const settings = getSettings();
         settings.directionPrompt = { ...DEFAULT_DIRECTION_PROMPTS };
@@ -1600,18 +1511,13 @@ function handleContextChanged() {
     refreshPopupIfOpened();
 }
 
-// 프롬프트 주입 함수
-// 전역/캐릭터/채팅은 각자 다른 Depth를 가질 수 있으므로, 활성화된 범위마다
-// 별도의 system 메시지를 만들어 그 범위의 Depth 위치에 각각 삽입한다.
 function injectDirectionPrompt(eventData) {
     const settings = getSettings();
 
-    // 확장이 비활성화되어 있으면 주입하지 않음
     if (!settings.extensionEnabled) {
         return;
     }
 
-    // 참고 파일 방식: eventData.chat 또는 eventData.messages 확인
     const messages = eventData.chat || eventData.messages;
 
     if (!messages || !Array.isArray(messages)) {
@@ -1629,15 +1535,12 @@ function injectDirectionPrompt(eventData) {
 
         const template = templates[scope];
 
-        // 이 범위의 프롬프트 템플릿이 비어있으면 이 범위는 건너뜀 (다른 범위는 계속 진행)
         if (!template || template.trim() === "") {
             return;
         }
 
-        // 플레이스홀더 치환 (각 범위는 자기 템플릿에만 자기 내용을 채운다 — 다른 범위와 합쳐지지 않음)
         const processedPrompt = template
-            .replace(/\{\{direction\}\}/g, value.content.trim())
-            // 예전에 커스텀 프롬프트에 남긴 흔적이 있어도 확장에서는 더 이상 처리하지 않음
+            .replace(/\{\{direction\}\}/g, () => value.content.trim())
             .replace(/\{\{char\}\}/g, "")
             .replace(/\{\{user\}\}/g, "");
 
@@ -1648,30 +1551,23 @@ function injectDirectionPrompt(eventData) {
 
         const depth = getScopeDepth(scope);
 
-        // 참고 파일의 방식을 따라 범위별 depth 적용
         if (depth === 0) {
-            // 맨 끝에 추가
             messages.push(systemMessage);
         } else {
-            // 끝에서부터 N번째 위치에 삽입
             const insertIndex = Math.max(messages.length - depth, 0);
             messages.splice(insertIndex, 0, systemMessage);
         }
     });
 }
 
-// 확장 초기화
 jQuery(async () => {
     await loadSettings();
     applyAllPlaceholders();
 
-    // 확장 메뉴 초기화
     await initializeExtensionMenu();
 
-    // 컴팩트 UI 버튼 추가
     addCompactUIButton();
 
-    // 프롬프트 주입 이벤트 리스너 등록
     eventSource.on(event_types.CHAT_COMPLETION_PROMPT_READY, injectDirectionPrompt);
     eventSource.on(event_types.CHAT_CHANGED, handleContextChanged);
 
