@@ -1,6 +1,5 @@
 /* Direction-Manager 확장 스타일 - direction 전용 컴팩트 UI */
 
-/* 컴팩트 UI 버튼 스타일 */
 .dm-compact--button {
     order: 3;
     display: flex;
@@ -27,9 +26,6 @@
     opacity: 1;
 }
 
-/* 컴팩트 UI 팝업 스타일
-   팝업 높이는 고정하지 않는다 — 내부를 flex column으로 짜서, textarea의 높이가
-   곧 팝업 전체 높이를 결정한다(유저가 드래그로 늘리면 팝업도 같이 늘어남). */
 .dm-compact--popup {
     filter: drop-shadow(1px 1px 2px var(--black50a));
     z-index: 30000;
@@ -42,10 +38,6 @@
     right: 0;
     width: 450px;
     max-width: 90vw;
-    /* 팝업 자체는 고정 height/vh를 두지 않는다. 높이는 내부 textarea의 크기로
-       결정되며(입력칸이 늘어나면 팝업이 위로 커짐), 상한선은 팝업을 열 때 JS가
-       textarea에 한 번만 계산해서 거는 max-height로 처리한다(키보드 열림/닫힘과
-       무관하게 고정 — vh를 쓰면 키보드가 열릴 때마다 값이 바뀌어 버벅였다). */
     display: flex;
     flex-direction: column;
     transition: 200ms;
@@ -59,7 +51,6 @@
     opacity: 1;
 }
 
-/* 헤더: direction 하나만 표시하므로 좌우 이동 버튼 공간 제거 */
 .dm-compact--header {
     display: flex;
     align-items: center;
@@ -70,7 +61,6 @@
     flex-shrink: 0;
 }
 
-/* 헤더 좌우를 벌려서 체크박스+타이틀은 왼쪽, 지우개/이전·다음 버튼은 오른쪽에 붙인다 */
 .dm-compact--title {
     font-family: 'Courier New', monospace;
     font-size: 15px;
@@ -111,7 +101,6 @@
     box-shadow: none;
 }
 
-/* 헤더의 지우개 버튼, 프리셋 버튼, 범위별 이전/현재 내용 토글 버튼 */
 .dm-compact--nav,
 .dm-compact--preset-btn,
 .dm-compact--history-btn {
@@ -137,6 +126,17 @@
     color: var(--SmartThemeBodyColor);
 }
 
+.dm-compact--history-count {
+    min-width: 28px;
+    text-align: center;
+    font-size: 11px;
+    opacity: 0.7;
+    color: var(--SmartThemeBodyColor);
+    font-variant-numeric: tabular-nums;
+    flex-shrink: 0;
+    user-select: none;
+}
+
 .dm-compact--scope-row {
     display: flex;
     gap: 6px;
@@ -149,7 +149,6 @@
 .dm-compact--scope-btn {
     background: transparent;
     border: 1px solid var(--SmartThemeBorderColor);
-    /* 기본(꺼짐) 상태: 글자를 흐리게 표시. 켜짐 여부는 --on 클래스가 덮어씀 */
     color: var(--SmartThemeBodyColor);
     opacity: 0.55;
     border-radius: 4px;
@@ -164,24 +163,17 @@
     gap: 4px;
 }
 
-/* 지금 보고 있는 탭: 테두리(+은은한 배경)로만 표시. 글자색/이모지 채도는 건드리지
-   않는다 — "선택됨"과 "이 범위가 켜져 있음"은 서로 다른 정보라 채널을 분리한다. */
 .dm-compact--scope-btn--active {
-    /* color-mix를 지원하지 않는 환경(webview 등)에서도 항상 옅게 나오도록,
-       테마 색상에 기대지 않는 반투명 회색 배경 + 테마색 테두리로 표시 */
     background-color: rgba(127, 127, 127, 0.22);
     border-color: var(--SmartThemeQuoteColor);
 }
 
-/* 이 범위(전역/캐릭터/채팅)에 켜져서 실제로 적용 중인 내용이 있음을 표시.
-   선택 여부와 무관하게 독립적으로 켜지고 꺼진다. */
 .dm-compact--scope-btn--on {
     color: var(--SmartThemeQuoteColor);
     opacity: 1;
 }
 
 .dm-compact--scope-emoji {
-    /* 꺼짐: 회색조 + 흐리게. --on이 붙으면 원색으로 복원 */
     filter: grayscale(1);
     opacity: 0.6;
     transition: filter 0.2s ease, opacity 0.2s ease;
@@ -192,7 +184,6 @@
     opacity: 1;
 }
 
-/* 확장 설정 패널의 범위별 Direction 프롬프트 탭 (전역/캐릭터/채팅) */
 .dm-prompt-tab-btn--active {
     background-color: rgba(127, 127, 127, 0.22);
     border-color: var(--SmartThemeQuoteColor);
@@ -237,10 +228,6 @@
 
 .dm-compact--textarea {
     width: 100%;
-    /* 팝업이 더 이상 고정 height가 아니므로, textarea 자신의 height(기본값은 JS가
-       열 때 지정, 이후엔 유저가 드래그로 리사이즈한 값)가 곧 팝업 크기를 결정한다.
-       max-height는 팝업을 열 때 JS가 화면을 벗어나지 않는 선에서 한 번만 계산해
-       인라인으로 걸어준다(키보드 열림/닫힘에 따라 다시 계산하지 않음). */
     min-height: 90px;
     padding: 8px;
     border: 1px solid var(--SmartThemeBorderColor);
@@ -251,8 +238,6 @@
     font-size: var(--mainFontSize);
     resize: vertical;
     box-sizing: border-box;
-    /* height는 transition에서 뺀다 — 리사이즈/스코프 전환 때 높이가 애니메이션으로
-       스르륵 바뀌면 오히려 버벅이는 것처럼 느껴짐 */
     transition: background-color 0.2s ease, border-color 0.2s ease;
     line-height: 1.25;
 }
@@ -272,17 +257,10 @@
     cursor: not-allowed;
 }
 
-/* footer 자체를 없애고, 지우개/이전·다음 버튼은 헤더로, "활성" 표시는 스코프
-   버튼(색/이모지)으로 옮겼다. */
-
-/* 채팅 범위에서는 프리셋 줄을 완전히 없앤다(자리도 차지 안 함). 그 대신 없어진
-   만큼의 높이는 JS가 채팅 textarea 기본 높이에 더해줘서, 유저가 직접 리사이즈한
-   적 없는 한 전역/캐릭터/채팅 세 탭의 팝업 전체 크기가 항상 같아 보이게 한다. */
 .dm-compact--popup.dm-compact--hide-preset .dm-compact--preset-row {
     display: none;
 }
 
-/* 태블릿 반응형 디자인 */
 @media (max-width: 950px) {
     .dm-compact--popup {
         width: 380px;
@@ -294,7 +272,6 @@
     }
 }
 
-/* 스마트폰 반응형 디자인 */
 @media (max-width: 480px) {
     .dm-compact--popup {
         width: 320px;
@@ -346,7 +323,6 @@
     }
 }
 
-/* 스크롤바 스타일 */
 .dm-compact--textarea::-webkit-scrollbar {
     width: 8px;
 }
