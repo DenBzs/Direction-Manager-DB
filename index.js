@@ -5,6 +5,8 @@ import { Popup } from "../../../popup.js";
 
 const extensionName = "Direction-Manager-DB";
 const LOG_PREFIX = "[🪄전개지시M]";
+// 실제로 설치된 폴더 경로. 폴더명이 달라도(예: Ptest) settings.html을 이 폴더에서 읽기 위함
+const extensionFolderUrl = new URL(".", import.meta.url).pathname;
 
 const DEFAULT_DIRECTION_PROMPT_CHAT = `<direction>
 - Resume the story based on the director's instructions below.
@@ -22,6 +24,34 @@ const DEFAULT_DIRECTION_PROMPT_GLOBAL = `<format_rules>
 </format_rules>`;
 
 const DEFAULT_DIRECTION_PROMPT_CHAR = `<character_notes>
+- The following are background notes about the characters' current state and the world (situation, emotions, personality, setting).
+- Keep them in mind as quiet background knowledge while writing. They do not need to show up in every reply.
+- Never state, quote, or explain these notes directly. Let them surface only indirectly, through tone, behavior, and small details, and only when it fits the scene.
+
+{{direction}}
+</character_notes>`;
+
+const DEFAULT_DIRECTION_PROMPT_PLOT_MAIN = `<story_direction>
+- The following is the long-term outline of where this story is heading. None of it has happened yet.
+- Treat it as background knowledge only. Do not rush toward it, and do not write its ending until the story has genuinely built up to it or the user explicitly directs it.
+- Neither rush nor stall: every reply should move the story forward at least a little, without repeating the same situation.
+- Never quote or announce this outline.
+
+{{direction}}
+</story_direction>`;
+
+const DEFAULT_DIRECTION_PROMPT_PLOT_NEXT = `<next_beats>
+- The following are the upcoming events planned for the next few replies, in order. None of them has happened yet.
+- Skip any beat already covered in the chat history and continue from the first beat that has not been written yet.
+- In a single reply, write only one scene (or part of one) from that first unwritten beat. Never cover several beats in one reply, and never write, hint at, or resolve the beats that come after it.
+- End the reply at a natural pause that leaves room for the next beat to follow.
+- When every beat has been written, keep moving slowly toward the long-term outline (if one is given), one scene at a time, without jumping ahead.
+
+{{direction}}
+</next_beats>`;
+
+// v5까지의 캐릭터 기본 프롬프트 (v6 마이그레이션에서 "기본값 그대로인지" 비교용)
+const LEGACY_CHAR_PROMPT_V5 = `<character_notes>
 - The following are ongoing notes about the current situation, emotions, personality, or world details that apply to this conversation for the next several turns.
 - Treat them as established fact and weave them naturally into the story; do not quote them directly or announce that you received notes.
 
@@ -34,6 +64,8 @@ const DEFAULT_DIRECTION_PROMPT = DEFAULT_DIRECTION_PROMPT_CHAT;
 const DEFAULT_DIRECTION_PROMPTS = {
     global: DEFAULT_DIRECTION_PROMPT_GLOBAL,
     char: DEFAULT_DIRECTION_PROMPT_CHAR,
+    plotMain: DEFAULT_DIRECTION_PROMPT_PLOT_MAIN,
+    plotNext: DEFAULT_DIRECTION_PROMPT_PLOT_NEXT,
     chat: DEFAULT_DIRECTION_PROMPT_CHAT,
 };
 
@@ -49,10 +81,49 @@ function defaultPlaceholderState() {
 const SCOPE_LABELS = {
     global: "[Format Rules]",
     char: "[Character Notes]",
+    plotMain: "[Story Direction]",
+    plotNext: "[Next Beats]",
     chat: "[Director's Note]",
 };
 
-const SCOPE_ORDER = ["global", "char", "chat"];
+// 저장·프롬프트 주입 단위(총 5개). 화면의 탭은 아래 TAB_*로 묶는다.
+const SCOPE_ORDER = ["global", "char", "plotMain", "plotNext", "chat"];
+
+// 화면 탭: 줄거리 탭 하나 안에 큰 줄거리(plotMain) / 지금 전개(plotNext) 두 칸이 들어 있다.
+const TAB_ORDER = ["global", "char", "plot", "chat"];
+const TAB_SCOPES = {
+    global: ["global"],
+    char: ["char"],
+    plot: ["plotMain", "plotNext"],
+    chat: ["chat"],
+};
+
+// 숫자가 작을수록 최신 메시지에 가깝다 (0 = 맨 끝)
+const DEFAULT_PROMPT_DEPTHS = { global: 2, char: 5, plotMain: 3, plotNext: 1, chat: 0 };
+
+// 줄거리 두 칸은 채팅(대화) 단위로 저장된다. settings 안의 보관함 이름.
+const PLOT_STORE = { plotMain: "plotMains", plotNext: "plotNexts" };
+
+const SCOPE_PLACEHOLDERS = {
+    default: "Direction 내용을 입력하세요...",
+    plotMain: "전체 방향·결말을 적으세요 (모델이 배경으로만 참고해요)",
+    plotNext: "앞으로 몇 챗 분량의 사건을 순서대로 적으세요 (구체적일수록 속도가 잘 맞아요)",
+};
+
+let lastPlotScope = "plotNext";
+
+function scopeToTab(scope) {
+    return TAB_ORDER.find((tab) => TAB_SCOPES[tab].includes(scope)) || "chat";
+}
+
+function getTabScopes(scope) {
+    return TAB_SCOPES[scopeToTab(scope)];
+}
+
+// 채팅·줄거리 탭은 프리셋 줄을 빼고 그만큼 입력칸을 쓴다
+function scopeHidesPresets(scope) {
+    return scope === "chat" || scopeToTab(scope) === "plot";
+}
 
 // 기록에 남는 항목의 최대 개수(현재 보고 있는 칸 포함). 화면에는 N/5로 표시된다.
 const HISTORY_TOTAL_MAX = 5;
@@ -70,28 +141,38 @@ const defaultSettings = {
     global: defaultScopeState(),
     chars: {},
     chats: {},
+    plotMains: {},
+    plotNexts: {},
     presets: {
-        direction: { global: [], char: [], chat: [] },
+        direction: { global: [], char: [], plotMain: [], plotNext: [], chat: [] },
     },
     extensionEnabled: true,
     directionPrompt: { ...DEFAULT_DIRECTION_PROMPTS },
     // 0: Chat History 끝에 삽입, >0: 끝에서 N번째 위치에 삽입
-    promptDepth: { global: 1, char: 1, chat: 1 },
+    promptDepth: { ...DEFAULT_PROMPT_DEPTHS },
     lastScope: "chat",
     _migratedV2: false,
     _migratedV3: false,
     _migratedV4: false,
     _migratedV5: false,
+    _migratedV6: false,
 };
 
 let currentScope = "chat";
 function textareaHeightGroup(scope) {
-    return scope === "chat" ? "chat" : "shared";
+    if (scope === "chat") return "chat";
+    if (scopeToTab(scope) === "plot") return "plot";
+    return "shared";
 }
 let compactUITextareaHeights = { shared: "", chat: "" };
 let chatHeightIsCustom = false;
 let resizeCandidateHeight = null;
 let cachedPresetRowHeight = 0;
+
+function getScopeTextarea(scope) {
+    if (!compactUIPopup) return $();
+    return compactUIPopup.find(scope === "plotNext" ? ".dm-compact--textarea-next" : ".dm-compact--textarea-main");
+}
 
 function measurePresetRowHeight() {
     if (!compactUIPopup) return 0;
@@ -120,16 +201,31 @@ function defaultTextareaHeightPx() {
 }
 
 // 채팅 탭은 직접 리사이즈한 적이 없으면 (공용 높이 + 프리셋 줄 높이)로 맞춰 팝업 크기를 동일하게 유지
+// 줄거리 탭: 라벨 2줄(18px×2) + 칸 사이 간격(3px×3)을 뺀 만큼을 큰 줄거리 4 : 지금 전개 6으로 나눈다
+const PLOT_CHROME_PX = 45;
+const PLOT_MAIN_HEIGHT_RATIO = 0.4;
+
+// 채팅·줄거리 탭은 직접 리사이즈한 적이 없으면 (공용 높이 + 프리셋 줄 높이)로 맞춰 팝업 크기를 동일하게 유지
 function restoreTextareaHeightForCurrentScope() {
     if (!compactUIPopup) return;
 
-    const textarea = compactUIPopup.find(".dm-compact--textarea");
+    const isPlot = scopeToTab(currentScope) === "plot";
+    const textarea = getScopeTextarea(isPlot ? "plotMain" : currentScope);
 
     if (!textarea.length) return;
 
+    const sharedPx = parseFloat(compactUITextareaHeights.shared || defaultTextareaHeightPx())
+        || parseFloat(defaultTextareaHeightPx());
+
+    if (isPlot) {
+        const total = Math.max(110, Math.round(sharedPx + cachedPresetRowHeight - PLOT_CHROME_PX));
+        const mainPx = Math.round(total * PLOT_MAIN_HEIGHT_RATIO);
+        textarea[0].style.height = `${mainPx}px`;
+        getScopeTextarea("plotNext")[0].style.height = `${total - mainPx}px`;
+        return;
+    }
+
     if (currentScope === "chat" && !chatHeightIsCustom) {
-        const sharedPx = parseFloat(compactUITextareaHeights.shared || defaultTextareaHeightPx())
-            || parseFloat(defaultTextareaHeightPx());
         textarea[0].style.height = `${Math.round(sharedPx + cachedPresetRowHeight)}px`;
         return;
     }
@@ -233,7 +329,7 @@ function navigateHistory(direction) {
         return;
     }
 
-    compactUIPopup.find(".dm-compact--textarea").val(scopedValue.content);
+    getScopeTextarea(currentScope).val(scopedValue.content);
     beginHistorySession(scopedValue);
     applyPlaceholderToSystem(placeholder);
     saveSettingsDebounced();
@@ -319,6 +415,8 @@ function sanitizeScopePresets(scopePresets) {
     return {
         global: sanitizePresetList(src.global),
         char: sanitizePresetList(src.char),
+        plotMain: sanitizePresetList(src.plotMain),
+        plotNext: sanitizePresetList(src.plotNext),
         chat: sanitizePresetList(src.chat),
     };
 }
@@ -356,32 +454,40 @@ function pruneRemovedPlaceholders() {
 }
 
 function normalizePromptDepth(raw) {
+    // 구버전: 숫자 하나를 모든 범위에 공통 적용했음 (줄거리 두 칸은 이 시절에 없었으므로 새 기본값 사용)
     if (Number.isInteger(raw)) {
-        return { global: raw, char: raw, chat: raw };
+        return {
+            ...DEFAULT_PROMPT_DEPTHS,
+            global: raw,
+            char: raw,
+            chat: raw,
+        };
     }
 
     const src = raw && typeof raw === "object" ? raw : {};
+    const result = {};
 
-    return {
-        global: Number.isInteger(src.global) ? src.global : 1,
-        char: Number.isInteger(src.char) ? src.char : 1,
-        chat: Number.isInteger(src.chat) ? src.chat : 1,
-    };
+    SCOPE_ORDER.forEach((scope) => {
+        result[scope] = Number.isInteger(src[scope]) ? src[scope] : DEFAULT_PROMPT_DEPTHS[scope];
+    });
+
+    return result;
 }
 
 function getScopeDepth(scope) {
     const depth = getSettings().promptDepth;
-    return Number.isInteger(depth?.[scope]) ? depth[scope] : 1;
+    return Number.isInteger(depth?.[scope]) ? depth[scope] : DEFAULT_PROMPT_DEPTHS[scope];
 }
 
 function normalizeDirectionPromptObject(raw) {
     const src = raw && typeof raw === "object" ? raw : {};
+    const result = {};
 
-    return {
-        global: typeof src.global === "string" ? src.global : DEFAULT_DIRECTION_PROMPTS.global,
-        char: typeof src.char === "string" ? src.char : DEFAULT_DIRECTION_PROMPTS.char,
-        chat: typeof src.chat === "string" ? src.chat : DEFAULT_DIRECTION_PROMPTS.chat,
-    };
+    SCOPE_ORDER.forEach((scope) => {
+        result[scope] = typeof src[scope] === "string" ? src[scope] : DEFAULT_DIRECTION_PROMPTS[scope];
+    });
+
+    return result;
 }
 
 function isGroupContext(context) {
@@ -470,6 +576,9 @@ function normalizeSettings() {
     settings.global = sanitizeScopeState(settings.global);
     settings.chars = settings.chars && typeof settings.chars === "object" ? settings.chars : {};
     settings.chats = settings.chats && typeof settings.chats === "object" ? settings.chats : {};
+    Object.values(PLOT_STORE).forEach((storeKey) => {
+        settings[storeKey] = settings[storeKey] && typeof settings[storeKey] === "object" ? settings[storeKey] : {};
+    });
     settings.presets = sanitizePresets(settings.presets);
     settings.extensionEnabled = typeof settings.extensionEnabled === "boolean" ? settings.extensionEnabled : defaultSettings.extensionEnabled;
     settings.directionPrompt = normalizeDirectionPromptObject(settings.directionPrompt);
@@ -479,6 +588,7 @@ function normalizeSettings() {
     settings._migratedV3 = Boolean(settings._migratedV3);
     settings._migratedV4 = Boolean(settings._migratedV4);
     settings._migratedV5 = Boolean(settings._migratedV5);
+    settings._migratedV6 = Boolean(settings._migratedV6);
 
     Object.keys(settings.chars).forEach((key) => {
         settings.chars[key] = sanitizeScopeState(settings.chars[key]);
@@ -486,6 +596,12 @@ function normalizeSettings() {
 
     Object.keys(settings.chats).forEach((key) => {
         settings.chats[key] = sanitizeScopeState(settings.chats[key]);
+    });
+
+    Object.values(PLOT_STORE).forEach((storeKey) => {
+        Object.keys(settings[storeKey]).forEach((key) => {
+            settings[storeKey][key] = sanitizeScopeState(settings[storeKey][key]);
+        });
     });
 }
 
@@ -599,6 +715,35 @@ function migrateV5DirectionPromptIfNeeded() {
     return true;
 }
 
+// v6: 줄거리 탭(큰 줄거리/지금 전개) 추가.
+// - 캐릭터 프롬프트가 예전 기본값 그대로면 "은은하게 참고" 새 기본값으로 교체
+// - Depth가 예전 기본값(전부 1) 그대로면 새 기본값으로 교체 (직접 바꾼 값은 건드리지 않음)
+function migrateV6PlotScopesIfNeeded() {
+    const settings = getSettings();
+
+    if (settings._migratedV6) {
+        return false;
+    }
+
+    const prompts = settings.directionPrompt;
+
+    if (prompts && typeof prompts === "object" && prompts.char === LEGACY_CHAR_PROMPT_V5) {
+        prompts.char = DEFAULT_DIRECTION_PROMPT_CHAR;
+    }
+
+    const depth = settings.promptDepth;
+
+    if (depth && typeof depth === "object"
+        && depth.global === 1 && depth.char === 1 && depth.chat === 1
+        && depth.plotMain === undefined && depth.plotNext === undefined) {
+        settings.promptDepth = { ...DEFAULT_PROMPT_DEPTHS };
+    }
+
+    settings._migratedV6 = true;
+    console.log(`${LOG_PREFIX} 줄거리 탭이 추가되었습니다. (예전 기본값을 쓰던 캐릭터 프롬프트/Depth는 새 기본값으로 교체)`);
+    return true;
+}
+
 async function loadSettings() {
     const settings = getSettings();
 
@@ -610,10 +755,11 @@ async function loadSettings() {
     const migratedV3 = migrateV3PresetsIfNeeded();
     const migratedV4 = migrateV4LegacyCharScopeIfNeeded();
     const migratedV5 = migrateV5DirectionPromptIfNeeded();
+    const migratedV6 = migrateV6PlotScopesIfNeeded();
     const pruned = pruneRemovedPlaceholders();
     normalizeSettings();
 
-    if (migrated || migratedV3 || migratedV4 || migratedV5 || pruned) {
+    if (migrated || migratedV3 || migratedV4 || migratedV5 || migratedV6 || pruned) {
         saveSettingsDebounced();
     }
 }
@@ -633,6 +779,15 @@ function ensureScopedSettings(scope) {
         return settings.chars[key];
     }
 
+    if (PLOT_STORE[scope]) {
+        const key = getCurrentChatKey();
+        if (!key) return null;
+        const storeKey = PLOT_STORE[scope];
+        settings[storeKey] = settings[storeKey] && typeof settings[storeKey] === "object" ? settings[storeKey] : {};
+        settings[storeKey][key] = sanitizeScopeState(settings[storeKey][key]);
+        return settings[storeKey][key];
+    }
+
     const key = getCurrentChatKey();
     if (!key) return null;
     settings.chats[key] = sanitizeScopeState(settings.chats[key]);
@@ -650,6 +805,12 @@ function getScopedSettings(scope) {
         const key = getCurrentCharKey();
         if (!key) return null;
         return sanitizeScopeState(settings.chars[key]);
+    }
+
+    if (PLOT_STORE[scope]) {
+        const key = getCurrentChatKey();
+        if (!key) return null;
+        return sanitizeScopeState(settings[PLOT_STORE[scope]]?.[key]);
     }
 
     const key = getCurrentChatKey();
@@ -803,12 +964,15 @@ function ensureUsableCurrentScope() {
 function refreshScopeButtons() {
     if (!compactUIPopup) return;
 
-    SCOPE_ORDER.forEach((scope) => {
-        const btn = compactUIPopup.find(`.dm-compact--scope-btn[data-scope="${scope}"]`);
-        const availability = getScopeAvailability(scope);
+    const activeTab = scopeToTab(currentScope);
+
+    TAB_ORDER.forEach((tab) => {
+        const btn = compactUIPopup.find(`.dm-compact--scope-btn[data-tab="${tab}"]`);
+        const firstScope = TAB_SCOPES[tab][0];
+        const availability = getScopeAvailability(firstScope);
         btn.prop("disabled", !availability.available);
-        btn.attr("title", getScopeButtonTitle(scope));
-        btn.toggleClass("dm-compact--scope-btn--active", scope === currentScope);
+        btn.attr("title", getScopeButtonTitle(firstScope));
+        btn.toggleClass("dm-compact--scope-btn--active", tab === activeTab);
     });
 }
 
@@ -866,13 +1030,47 @@ function updateAppliedIndicator() {
     const combined = resolveCombinedContent(placeholder.key);
     const activeScopes = new Set(combined.activeScopes);
 
-    SCOPE_ORDER.forEach((scope) => {
+    TAB_ORDER.forEach((tab) => {
+        const isOn = TAB_SCOPES[tab].some((scope) => activeScopes.has(scope));
         compactUIPopup
-            .find(`.dm-compact--scope-btn[data-scope="${scope}"]`)
-            .toggleClass("dm-compact--scope-btn--on", activeScopes.has(scope));
+            .find(`.dm-compact--scope-btn[data-tab="${tab}"]`)
+            .toggleClass("dm-compact--scope-btn--on", isOn);
     });
 
     refreshHistoryButtons();
+}
+
+// 줄거리 탭에서 지금 편집 중인 칸(큰 줄거리/지금 전개)을 강조
+function updateActiveFieldHighlight() {
+    if (!compactUIPopup) return;
+
+    compactUIPopup.find(".dm-compact--textarea, .dm-compact--plot-label").each(function () {
+        $(this).toggleClass("dm-compact--field-active", $(this).attr("data-scope") === currentScope);
+    });
+}
+
+// 줄거리 탭에서 다른 칸으로 포커스가 옮겨졌을 때: 이전 칸의 기록을 확정하고 헤더(←/→, 체크박스)가 새 칸을 가리키게 한다.
+// 입력창 내용은 건드리지 않는다(커서가 튀지 않게).
+function switchActiveField(scope) {
+    if (!compactUIPopup || scope === currentScope) return;
+
+    flushHistorySession();
+
+    currentScope = scope;
+
+    if (scopeToTab(scope) === "plot") {
+        lastPlotScope = scope;
+    }
+
+    getSettings().lastScope = scope;
+    saveSettingsDebounced();
+
+    const state = getCurrentScopeState(getPopupCurrentPlaceholder().key);
+    beginHistorySession(state);
+    compactUIPopup.find(".dm-compact--radio").prop("checked", state.enabled);
+
+    updateActiveFieldHighlight();
+    updateAppliedIndicator();
 }
 
 function syncPopupByCurrentState() {
@@ -882,19 +1080,33 @@ function syncPopupByCurrentState() {
 
     const currentPlaceholder = getPopupCurrentPlaceholder();
     const settings = getCurrentScopeState(currentPlaceholder.key);
+    const isPlot = scopeToTab(currentScope) === "plot";
     beginHistorySession(settings);
 
     compactUIPopup.find(".dm-compact--radio").prop("checked", settings.enabled);
-    compactUIPopup
-        .find(".dm-compact--textarea")
-        .val(settings.content || "")
-        .prop("disabled", !settings.enabled);
+    compactUIPopup.toggleClass("dm-compact--plot-tab", isPlot);
 
-    compactUIPopup.toggleClass("dm-compact--hide-preset", currentScope === "chat");
+    // 위 칸은 줄거리 탭에서는 큰 줄거리, 다른 탭에서는 현재 범위. 아래 칸은 줄거리 탭에서만 보인다.
+    [
+        { slot: "main", scope: isPlot ? "plotMain" : currentScope },
+        { slot: "next", scope: "plotNext" },
+    ].forEach(({ slot, scope }) => {
+        const state = getScopedPlaceholder(scope, currentPlaceholder.key) || defaultPlaceholderState();
+
+        compactUIPopup
+            .find(`.dm-compact--textarea-${slot}`)
+            .attr("data-scope", scope)
+            .attr("placeholder", SCOPE_PLACEHOLDERS[scope] || SCOPE_PLACEHOLDERS.default)
+            .val(state.content || "")
+            .prop("disabled", !settings.enabled);
+    });
+
+    compactUIPopup.toggleClass("dm-compact--hide-preset", scopeHidesPresets(currentScope));
 
     refreshScopeButtons();
     renderPresetSelect();
     updateAppliedIndicator();
+    updateActiveFieldHighlight();
 }
 
 function generatePresetId() {
@@ -970,6 +1182,10 @@ function showCompactUIPopup() {
     currentScope = settings.lastScope || "chat";
     ensureUsableCurrentScope();
 
+    if (scopeToTab(currentScope) === "plot") {
+        lastPlotScope = currentScope;
+    }
+
     compactUIButton.attr("data-dm-popup-open", "true");
 
     const popupHtml = `
@@ -991,9 +1207,10 @@ function showCompactUIPopup() {
             </div>
 
             <div class="dm-compact--scope-row">
-                <button class="dm-compact--scope-btn" data-scope="global" type="button"><span class="dm-compact--scope-emoji">🌐</span>전역</button>
-                <button class="dm-compact--scope-btn" data-scope="char" type="button"><span class="dm-compact--scope-emoji">🎭</span>캐릭터</button>
-                <button class="dm-compact--scope-btn" data-scope="chat" type="button"><span class="dm-compact--scope-emoji">🗨️</span>채팅</button>
+                <button class="dm-compact--scope-btn" data-tab="global" type="button"><span class="dm-compact--scope-emoji">🌐</span>전역</button>
+                <button class="dm-compact--scope-btn" data-tab="char" type="button"><span class="dm-compact--scope-emoji">🎭</span>캐릭터</button>
+                <button class="dm-compact--scope-btn" data-tab="plot" type="button"><span class="dm-compact--scope-emoji">📖</span>줄거리</button>
+                <button class="dm-compact--scope-btn" data-tab="chat" type="button"><span class="dm-compact--scope-emoji">🗨️</span>채팅</button>
             </div>
 
             <div class="dm-compact--preset-row">
@@ -1010,7 +1227,10 @@ function showCompactUIPopup() {
             </div>
 
             <div class="dm-compact--content">
-                <textarea class="dm-compact--textarea" placeholder="Direction 내용을 입력하세요..."></textarea>
+                <div class="dm-compact--plot-label dm-compact--plot-only" data-scope="plotMain">📖 큰 줄거리<small>방향·결말</small></div>
+                <textarea class="dm-compact--textarea dm-compact--textarea-main" placeholder="Direction 내용을 입력하세요..."></textarea>
+                <div class="dm-compact--plot-label dm-compact--plot-only" data-scope="plotNext">🎬 지금 전개<small>몇 챗 분량 사건</small></div>
+                <textarea class="dm-compact--textarea dm-compact--textarea-next dm-compact--plot-only" placeholder="Direction 내용을 입력하세요..."></textarea>
             </div>
         </div>
     `;
@@ -1062,7 +1282,8 @@ function setupCompactUIEventListeners() {
     }
 
     bindTapAction(".dm-compact--scope-btn", function () {
-        const nextScope = $(this).data("scope");
+        const nextTab = String($(this).data("tab"));
+        const nextScope = nextTab === "plot" ? lastPlotScope : TAB_SCOPES[nextTab][0];
         const availability = getScopeAvailability(nextScope);
 
         if (!availability.available) {
@@ -1071,9 +1292,13 @@ function setupCompactUIEventListeners() {
 
         flushHistorySession();
 
-        const textarea = compactUIPopup.find(".dm-compact--textarea");
+        // 줄거리 탭의 높이는 항상 공용 높이에서 계산하므로 따로 저장하지 않는다.
         const outgoingGroup = textareaHeightGroup(currentScope);
-        compactUITextareaHeights[outgoingGroup] = textarea.length ? textarea[0].style.height : "";
+
+        if (outgoingGroup !== "plot") {
+            const outgoingTextarea = getScopeTextarea(currentScope);
+            compactUITextareaHeights[outgoingGroup] = outgoingTextarea.length ? outgoingTextarea[0].style.height : "";
+        }
 
         currentScope = nextScope;
         getSettings().lastScope = nextScope;
@@ -1096,6 +1321,20 @@ function setupCompactUIEventListeners() {
             console.warn(`${LOG_PREFIX} 현재 스코프에 값을 저장하지 못했습니다.`);
             return;
         }
+
+        // 줄거리 탭처럼 한 탭에 두 칸이 있으면 두 칸을 함께 켜고 끈다.
+        getTabScopes(currentScope).forEach((scope) => {
+            if (scope === currentScope) return;
+
+            const sibling = ensureScopedSettings(scope);
+
+            if (sibling) {
+                sibling[currentPlaceholder.key] = sanitizePlaceholderValue({
+                    ...sanitizePlaceholderValue(sibling[currentPlaceholder.key]),
+                    enabled: isEnabled,
+                });
+            }
+        });
 
         const textarea = compactUIPopup.find(".dm-compact--textarea");
         textarea.prop("disabled", !isEnabled);
@@ -1158,13 +1397,28 @@ function setupCompactUIEventListeners() {
             return;
         }
 
-        compactUIPopup.find(".dm-compact--textarea").val("");
+        getScopeTextarea(currentScope).val("");
         applyPlaceholderToSystem(currentPlaceholder);
         saveSettingsDebounced();
         updateAppliedIndicator();
     });
 
+    // 줄거리 탭: 포커스가 옮겨진 칸을 "지금 편집 중인 칸"으로 삼는다
+    compactUIPopup.on("focusin", ".dm-compact--textarea", function () {
+        const fieldScope = $(this).attr("data-scope");
+
+        if (fieldScope) {
+            switchActiveField(fieldScope);
+        }
+    });
+
     compactUIPopup.find(".dm-compact--textarea").on("input", function () {
+        const fieldScope = $(this).attr("data-scope");
+
+        if (fieldScope && fieldScope !== currentScope) {
+            switchActiveField(fieldScope);
+        }
+
         const newContent = String($(this).val());
         const currentPlaceholder = getPopupCurrentPlaceholder();
         const scopedValue = getCurrentScopeState(currentPlaceholder.key);
@@ -1210,13 +1464,13 @@ function setupCompactUIEventListeners() {
             return;
         }
 
-        compactUIPopup.find(".dm-compact--textarea").val(selectedPreset.content).trigger("input");
+        getScopeTextarea(currentScope).val(selectedPreset.content).trigger("input");
         commitDirectionContentNow(getPopupCurrentPlaceholder());
     });
 
     compactUIPopup.find(".dm-compact--preset-save").on("click", async () => {
         const placeholder = getPopupCurrentPlaceholder();
-        const textareaValue = String(compactUIPopup.find(".dm-compact--textarea").val() || "");
+        const textareaValue = String(getScopeTextarea(currentScope).val() || "");
         const select = compactUIPopup.find(".dm-compact--preset-select");
         const selectedPresetId = String(select.val() || "");
 
@@ -1367,7 +1621,14 @@ function addCompactUIButton() {
 
 async function initializeExtensionMenu() {
     try {
-        const html = await $.get(`/scripts/extensions/third-party/${extensionName}/settings.html`);
+        let html;
+
+        try {
+            html = await $.get(`${extensionFolderUrl}settings.html`);
+        } catch (folderError) {
+            html = await $.get(`/scripts/extensions/third-party/${extensionName}/settings.html`);
+        }
+
         $("#extensions_settings").append(html);
 
         updateExtensionMenuUI();
@@ -1392,9 +1653,9 @@ function updateExtensionMenuUI() {
         .addClass("dm-prompt-tab-btn--active");
     $("#direction_prompt_text").val(prompts[promptEditorScope] ?? "");
 
-    $("#direction_prompt_depth_global").val(settings.promptDepth?.global ?? 1);
-    $("#direction_prompt_depth_char").val(settings.promptDepth?.char ?? 1);
-    $("#direction_prompt_depth_chat").val(settings.promptDepth?.chat ?? 1);
+    SCOPE_ORDER.forEach((scope) => {
+        $(`#direction_prompt_depth_${scope}`).val(settings.promptDepth?.[scope] ?? DEFAULT_PROMPT_DEPTHS[scope]);
+    });
 }
 
 async function clearCurrentCharScopeData() {
@@ -1434,6 +1695,33 @@ async function clearCurrentChatScopeData() {
 
     const settings = getSettings();
     delete settings.chats[key];
+    applyAllPlaceholders();
+    saveSettingsDebounced();
+    refreshPopupIfOpened();
+}
+
+async function clearCurrentPlotScopeData() {
+    const key = getCurrentChatKey();
+
+    if (!key) {
+        toastr.warning("현재 채팅을 찾을 수 없습니다.");
+        return;
+    }
+
+    const confirmed = await showNativeConfirm("줄거리 데이터 삭제", "현재 채팅의 줄거리(큰 줄거리·지금 전개) 저장 내용을 삭제하시겠습니까?");
+
+    if (!confirmed) {
+        return;
+    }
+
+    const settings = getSettings();
+
+    Object.values(PLOT_STORE).forEach((storeKey) => {
+        if (settings[storeKey]) {
+            delete settings[storeKey][key];
+        }
+    });
+
     applyAllPlaceholders();
     saveSettingsDebounced();
     refreshPopupIfOpened();
@@ -1482,28 +1770,26 @@ function setupExtensionMenuEventHandlers() {
             const value = parseInt(String($(this).val()), 10);
             const settings = getSettings();
             settings.promptDepth = normalizePromptDepth(settings.promptDepth);
-            settings.promptDepth[scope] = Number.isNaN(value) ? 1 : value;
+            settings.promptDepth[scope] = Number.isNaN(value) ? DEFAULT_PROMPT_DEPTHS[scope] : value;
             saveSettingsDebounced();
         });
     };
 
-    bindScopeDepthInput("global", "#direction_prompt_depth_global");
-    bindScopeDepthInput("char", "#direction_prompt_depth_char");
-    bindScopeDepthInput("chat", "#direction_prompt_depth_chat");
+    SCOPE_ORDER.forEach((scope) => {
+        bindScopeDepthInput(scope, `#direction_prompt_depth_${scope}`);
+    });
 
     $("#direction_reset_prompt").on("click", function () {
         const settings = getSettings();
         settings.directionPrompt = { ...DEFAULT_DIRECTION_PROMPTS };
-        settings.promptDepth = { global: 1, char: 1, chat: 1 };
-        $("#direction_prompt_depth_global").val(1);
-        $("#direction_prompt_depth_char").val(1);
-        $("#direction_prompt_depth_chat").val(1);
+        settings.promptDepth = { ...DEFAULT_PROMPT_DEPTHS };
         updateExtensionMenuUI();
         saveSettingsDebounced();
     });
 
     $("#direction_clear_char").on("click", clearCurrentCharScopeData);
     $("#direction_clear_chat").on("click", clearCurrentChatScopeData);
+    $("#direction_clear_plot").on("click", clearCurrentPlotScopeData);
 }
 
 function handleContextChanged() {
@@ -1525,6 +1811,7 @@ function injectDirectionPrompt(eventData) {
     }
 
     const templates = normalizeDirectionPromptObject(settings.directionPrompt);
+    const injections = [];
 
     SCOPE_ORDER.forEach((scope) => {
         const value = getScopedPlaceholder(scope, "direction");
@@ -1544,20 +1831,28 @@ function injectDirectionPrompt(eventData) {
             .replace(/\{\{char\}\}/g, "")
             .replace(/\{\{user\}\}/g, "");
 
-        const systemMessage = {
-            role: "system",
-            content: processedPrompt,
-        };
-
-        const depth = getScopeDepth(scope);
-
-        if (depth === 0) {
-            messages.push(systemMessage);
-        } else {
-            const insertIndex = Math.max(messages.length - depth, 0);
-            messages.splice(insertIndex, 0, systemMessage);
-        }
+        injections.push({
+            depth: getScopeDepth(scope),
+            message: { role: "system", content: processedPrompt },
+        });
     });
+
+    if (injections.length === 0) {
+        return;
+    }
+
+    // 모든 Depth를 "원래 메시지 기준"으로 정확히 맞추기 위해, 깊은 것(앞쪽)부터 삽입한다.
+    // (이미 끼워 넣은 개수만큼 인덱스가 밀리는 것을 보정) 같은 Depth끼리는 SCOPE_ORDER 순서를 유지한다.
+    const originalLength = messages.length;
+    let inserted = 0;
+
+    injections
+        .sort((a, b) => b.depth - a.depth)
+        .forEach(({ depth, message }) => {
+            const index = Math.max(originalLength - depth, 0) + inserted;
+            messages.splice(index, 0, message);
+            inserted += 1;
+        });
 }
 
 jQuery(async () => {
