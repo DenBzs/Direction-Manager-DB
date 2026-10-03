@@ -224,9 +224,12 @@
     flex: 1 1 auto;
     min-height: 0;
     display: flex;
+    flex-direction: column;
+    gap: 3px;
 }
 
 .dm-compact--textarea {
+    flex-shrink: 0;
     width: 100%;
     min-height: 90px;
     padding: 8px;
@@ -259,6 +262,46 @@
 
 .dm-compact--popup.dm-compact--hide-preset .dm-compact--preset-row {
     display: none;
+}
+
+/* 줄거리 탭: 큰 줄거리(위) / 지금 전개(아래) 두 칸. 다른 탭에서는 아래 칸과 라벨을 숨긴다. */
+.dm-compact--popup:not(.dm-compact--plot-tab) .dm-compact--plot-only {
+    display: none;
+}
+
+.dm-compact--plot-label {
+    height: 18px;
+    line-height: 18px;
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--SmartThemeBodyColor);
+    opacity: 0.6;
+    padding: 0 2px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    user-select: none;
+    flex-shrink: 0;
+}
+
+.dm-compact--plot-label small {
+    font-weight: 400;
+    opacity: 0.8;
+    margin-left: 6px;
+}
+
+.dm-compact--plot-label.dm-compact--field-active {
+    opacity: 1;
+    color: var(--SmartThemeQuoteColor);
+}
+
+.dm-compact--popup.dm-compact--plot-tab .dm-compact--textarea {
+    min-height: 44px;
+    resize: none;
+}
+
+.dm-compact--popup.dm-compact--plot-tab .dm-compact--textarea.dm-compact--field-active {
+    border-color: var(--SmartThemeQuoteColor);
 }
 
 @media (max-width: 950px) {
@@ -301,7 +344,8 @@
 
     .dm-compact--scope-btn {
         height: 26px;
-        padding: 0 7px;
+        padding: 0 6px;
+        gap: 3px;
         font-size: 13px;
         font-weight: 600;
     }
