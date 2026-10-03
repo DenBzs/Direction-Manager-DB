@@ -13,9 +13,11 @@
         <br>
         <div class="">
             <div><label class="flex1">Direction 프롬프트 (범위별로 따로 저장됩니다)</label></div>
-            <div class="flex-container flexnowrap dm-prompt-tabs" style="gap:6px; margin: 4px 0;">
+            <div class="flex-container dm-prompt-tabs" style="gap:6px; margin: 4px 0; flex-wrap: wrap;">
                 <button type="button" class="menu_button dm-prompt-tab-btn" data-scope="global">전역</button>
                 <button type="button" class="menu_button dm-prompt-tab-btn" data-scope="char">캐릭터</button>
+                <button type="button" class="menu_button dm-prompt-tab-btn" data-scope="plotMain">큰 줄거리</button>
+                <button type="button" class="menu_button dm-prompt-tab-btn" data-scope="plotNext">지금 전개</button>
                 <button type="button" class="menu_button dm-prompt-tab-btn" data-scope="chat">채팅</button>
             </div>
             <textarea id="direction_prompt_text" class="text_pole textarea_compact" rows="8" placeholder="Direction 프롬프트를 입력하세요..."></textarea>
@@ -23,17 +25,25 @@
         <br>
         <div class="flex-container flexnowrap">
             <label for="direction_prompt_depth_global" class="flex1">전역 삽입 위치 (Depth)</label>
-            <input id="direction_prompt_depth_global" class="text_pole widthUnset" type="number" min="0" max="100" value="1" title="0: Chat History 끝에 삽입, >0: 끝에서부터 N번째 위치에 삽입">
+            <input id="direction_prompt_depth_global" class="text_pole widthUnset" type="number" min="0" max="100" value="2" title="0: Chat History 끝에 삽입, >0: 끝에서부터 N번째 위치에 삽입">
         </div>
         <div class="flex-container flexnowrap">
             <label for="direction_prompt_depth_char" class="flex1">캐릭터 삽입 위치 (Depth)</label>
-            <input id="direction_prompt_depth_char" class="text_pole widthUnset" type="number" min="0" max="100" value="1" title="0: Chat History 끝에 삽입, >0: 끝에서부터 N번째 위치에 삽입">
+            <input id="direction_prompt_depth_char" class="text_pole widthUnset" type="number" min="0" max="100" value="5" title="0: Chat History 끝에 삽입, >0: 끝에서부터 N번째 위치에 삽입">
+        </div>
+        <div class="flex-container flexnowrap">
+            <label for="direction_prompt_depth_plotMain" class="flex1">큰 줄거리 삽입 위치 (Depth)</label>
+            <input id="direction_prompt_depth_plotMain" class="text_pole widthUnset" type="number" min="0" max="100" value="3" title="0: Chat History 끝에 삽입, >0: 끝에서부터 N번째 위치에 삽입">
+        </div>
+        <div class="flex-container flexnowrap">
+            <label for="direction_prompt_depth_plotNext" class="flex1">지금 전개 삽입 위치 (Depth)</label>
+            <input id="direction_prompt_depth_plotNext" class="text_pole widthUnset" type="number" min="0" max="100" value="1" title="0: Chat History 끝에 삽입, >0: 끝에서부터 N번째 위치에 삽입">
         </div>
         <div class="flex-container flexnowrap">
             <label for="direction_prompt_depth_chat" class="flex1">채팅 삽입 위치 (Depth)</label>
-            <input id="direction_prompt_depth_chat" class="text_pole widthUnset" type="number" min="0" max="100" value="1" title="0: Chat History 끝에 삽입, >0: 끝에서부터 N번째 위치에 삽입">
+            <input id="direction_prompt_depth_chat" class="text_pole widthUnset" type="number" min="0" max="100" value="0" title="0: Chat History 끝에 삽입, >0: 끝에서부터 N번째 위치에 삽입">
         </div>
-        <div class="flex-container flexnowrap">
+        <div class="flex-container" style="flex-wrap: wrap;">
             <button id="direction_reset_prompt" class="menu_button" title="기본 프롬프트로 초기화">
                 <i class="fa-solid fa-refresh"></i>
                 <span>기본값으로 초기화</span>
@@ -45,6 +55,10 @@
             <button id="direction_clear_chat" class="menu_button" title="현재 채팅 전용 저장 내용 삭제">
                 <i class="fa-solid fa-comment-slash"></i>
                 <span>이 채팅 데이터 삭제</span>
+            </button>
+            <button id="direction_clear_plot" class="menu_button" title="현재 채팅의 줄거리(큰 줄거리·지금 전개) 저장 내용 삭제">
+                <i class="fa-solid fa-book-open"></i>
+                <span>이 채팅 줄거리 삭제</span>
             </button>
         </div>
     </div>
