@@ -17,49 +17,89 @@
                 <button type="button" class="menu_button dm-prompt-tab-btn" data-scope="global">전역</button>
                 <button type="button" class="menu_button dm-prompt-tab-btn" data-scope="char">캐릭터</button>
                 <button type="button" class="menu_button dm-prompt-tab-btn" data-scope="plotMain">큰 줄거리</button>
-                <button type="button" class="menu_button dm-prompt-tab-btn" data-scope="plotNext">지금 전개</button>
+                <button type="button" class="menu_button dm-prompt-tab-btn" data-scope="plotNext">작은 줄거리</button>
                 <button type="button" class="menu_button dm-prompt-tab-btn" data-scope="chat">채팅</button>
             </div>
             <textarea id="direction_prompt_text" class="text_pole textarea_compact" rows="8" placeholder="Direction 프롬프트를 입력하세요..."></textarea>
+            <div class="flex-container dm-prompt-actions" style="gap:6px; margin-top:6px; justify-content:flex-end;">
+                <button id="direction_prompt_revert" type="button" class="menu_button" title="저장된 프롬프트로 되돌리기" disabled>
+                    <i class="fa-solid fa-rotate-left"></i>
+                    <span>되돌리기</span>
+                </button>
+                <button id="direction_prompt_save" type="button" class="menu_button dm-prompt-save" title="이 탭의 프롬프트 저장 (고치면 불이 켜져요)" disabled>
+                    <i class="fa-solid fa-floppy-disk"></i>
+                    <span>저장</span>
+                </button>
+            </div>
         </div>
         <br>
-        <div class="flex-container flexnowrap">
-            <label for="direction_prompt_depth_global" class="flex1">전역 삽입 위치 (Depth)</label>
-            <input id="direction_prompt_depth_global" class="text_pole widthUnset" type="number" min="0" max="100" value="2" title="0: Chat History 끝에 삽입, >0: 끝에서부터 N번째 위치에 삽입">
-        </div>
-        <div class="flex-container flexnowrap">
-            <label for="direction_prompt_depth_char" class="flex1">캐릭터 삽입 위치 (Depth)</label>
-            <input id="direction_prompt_depth_char" class="text_pole widthUnset" type="number" min="0" max="100" value="5" title="0: Chat History 끝에 삽입, >0: 끝에서부터 N번째 위치에 삽입">
-        </div>
-        <div class="flex-container flexnowrap">
-            <label for="direction_prompt_depth_plotMain" class="flex1">큰 줄거리 삽입 위치 (Depth)</label>
-            <input id="direction_prompt_depth_plotMain" class="text_pole widthUnset" type="number" min="0" max="100" value="3" title="0: Chat History 끝에 삽입, >0: 끝에서부터 N번째 위치에 삽입">
-        </div>
-        <div class="flex-container flexnowrap">
-            <label for="direction_prompt_depth_plotNext" class="flex1">지금 전개 삽입 위치 (Depth)</label>
-            <input id="direction_prompt_depth_plotNext" class="text_pole widthUnset" type="number" min="0" max="100" value="1" title="0: Chat History 끝에 삽입, >0: 끝에서부터 N번째 위치에 삽입">
-        </div>
-        <div class="flex-container flexnowrap">
-            <label for="direction_prompt_depth_chat" class="flex1">채팅 삽입 위치 (Depth)</label>
-            <input id="direction_prompt_depth_chat" class="text_pole widthUnset" type="number" min="0" max="100" value="0" title="0: Chat History 끝에 삽입, >0: 끝에서부터 N번째 위치에 삽입">
-        </div>
-        <div class="flex-container" style="flex-wrap: wrap;">
-            <button id="direction_reset_prompt" class="menu_button" title="기본 프롬프트로 초기화">
-                <i class="fa-solid fa-refresh"></i>
-                <span>기본값으로 초기화</span>
-            </button>
-            <button id="direction_clear_char" class="menu_button" title="현재 캐릭터 전용 저장 내용 삭제">
-                <i class="fa-solid fa-user-slash"></i>
-                <span>이 캐릭터 데이터 삭제</span>
-            </button>
-            <button id="direction_clear_chat" class="menu_button" title="현재 채팅 전용 저장 내용 삭제">
-                <i class="fa-solid fa-comment-slash"></i>
-                <span>이 채팅 데이터 삭제</span>
-            </button>
-            <button id="direction_clear_plot" class="menu_button" title="현재 채팅의 줄거리(큰 줄거리·지금 전개) 저장 내용 삭제">
-                <i class="fa-solid fa-book-open"></i>
-                <span>이 채팅 줄거리 삭제</span>
-            </button>
-        </div>
+        <details class="dm-data-details dm-depth-details">
+            <summary>📐 삽입 위치 (Depth)</summary>
+            <div class="flex-container flexnowrap dm-data-row">
+                <label for="direction_prompt_depth_global" class="flex1">전역</label>
+                <input id="direction_prompt_depth_global" class="text_pole widthUnset" type="number" min="0" max="100" value="0" title="0: Chat History 끝에 삽입, >0: 끝에서부터 N번째 위치에 삽입">
+            </div>
+            <div class="flex-container flexnowrap dm-data-row">
+                <label for="direction_prompt_depth_char" class="flex1">캐릭터</label>
+                <input id="direction_prompt_depth_char" class="text_pole widthUnset" type="number" min="0" max="100" value="2" title="0: Chat History 끝에 삽입, >0: 끝에서부터 N번째 위치에 삽입">
+            </div>
+            <div class="flex-container flexnowrap dm-data-row">
+                <label for="direction_prompt_depth_plotMain" class="flex1">큰 줄거리</label>
+                <input id="direction_prompt_depth_plotMain" class="text_pole widthUnset" type="number" min="0" max="100" value="4" title="0: Chat History 끝에 삽입, >0: 끝에서부터 N번째 위치에 삽입">
+            </div>
+            <div class="flex-container flexnowrap dm-data-row">
+                <label for="direction_prompt_depth_plotNext" class="flex1">작은 줄거리</label>
+                <input id="direction_prompt_depth_plotNext" class="text_pole widthUnset" type="number" min="0" max="100" value="3" title="0: Chat History 끝에 삽입, >0: 끝에서부터 N번째 위치에 삽입">
+            </div>
+            <div class="flex-container flexnowrap dm-data-row">
+                <label for="direction_prompt_depth_chat" class="flex1">채팅</label>
+                <input id="direction_prompt_depth_chat" class="text_pole widthUnset" type="number" min="0" max="100" value="1" title="0: Chat History 끝에 삽입, >0: 끝에서부터 N번째 위치에 삽입">
+            </div>
+        </details>
+        <details class="dm-data-details">
+            <summary>🧹 초기화 · 데이터 삭제</summary>
+            <div class="flex-container flexnowrap dm-data-row">
+                <span class="flex1">모든 프롬프트·Depth를 기본값으로</span>
+                <button id="direction_reset_prompt" type="button" class="menu_button dm-danger-btn" title="프롬프트와 Depth만 초기화 (저장한 내용·프리셋은 그대로)">
+                    <i class="fa-solid fa-refresh"></i>
+                    <span>초기화</span>
+                </button>
+            </div>
+            <div class="flex-container flexnowrap dm-data-row">
+                <span class="flex1">이 채팅방의 전역 칸</span>
+                <button id="direction_clear_global" type="button" class="menu_button dm-danger-btn" title="이 채팅방의 전역 칸을 기본 프리셋 상태로 되돌리기">
+                    <i class="fa-solid fa-trash"></i>
+                    <span>삭제</span>
+                </button>
+            </div>
+            <div class="flex-container flexnowrap dm-data-row">
+                <span class="flex1">이 채팅방의 캐릭터 칸</span>
+                <button id="direction_clear_char" type="button" class="menu_button dm-danger-btn" title="이 채팅방의 캐릭터 칸 저장 내용 삭제">
+                    <i class="fa-solid fa-user-slash"></i>
+                    <span>삭제</span>
+                </button>
+            </div>
+            <div class="flex-container flexnowrap dm-data-row">
+                <span class="flex1">이 채팅방의 줄거리 (큰·작은)</span>
+                <button id="direction_clear_plot" type="button" class="menu_button dm-danger-btn" title="이 채팅방의 줄거리(큰 줄거리·작은 줄거리) 저장 내용 삭제">
+                    <i class="fa-solid fa-book-open"></i>
+                    <span>삭제</span>
+                </button>
+            </div>
+            <div class="flex-container flexnowrap dm-data-row">
+                <span class="flex1">이 채팅방의 채팅 칸</span>
+                <button id="direction_clear_chat" type="button" class="menu_button dm-danger-btn" title="이 채팅방의 채팅 칸 저장 내용 삭제">
+                    <i class="fa-solid fa-comment-slash"></i>
+                    <span>삭제</span>
+                </button>
+            </div>
+            <div class="flex-container flexnowrap dm-data-row">
+                <span class="flex1">⚠️ 모든 채팅방의 전체 데이터</span>
+                <button id="direction_clear_all" type="button" class="menu_button dm-danger-btn" title="모든 채팅방의 전역·캐릭터·줄거리·채팅 칸 내용 삭제 (프리셋·프롬프트는 유지)">
+                    <i class="fa-solid fa-skull-crossbones"></i>
+                    <span>전체 삭제</span>
+                </button>
+            </div>
+        </details>
     </div>
 </div>
