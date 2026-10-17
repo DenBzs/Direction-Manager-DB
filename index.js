@@ -423,11 +423,31 @@ function sanitizePlaceholderValue(value) {
     let activeIndex = Number.isInteger(value?.activeIndex) ? value.activeIndex : entries.length - 1;
     activeIndex = Math.min(Math.max(activeIndex, 0), entries.length - 1);
 
+    const byPreset = {};
+
+    if (value?.byPreset && typeof value.byPreset === "object") {
+        Object.keys(value.byPreset).forEach((id) => {
+            const saved = value.byPreset[id];
+            if (!saved || !Array.isArray(saved.entries)) return;
+
+            const savedEntries = saved.entries.filter((item) => typeof item === "string");
+            if (!savedEntries.length) return;
+
+            capEntries(savedEntries);
+            const savedIndex = Number.isInteger(saved.activeIndex) ? saved.activeIndex : savedEntries.length - 1;
+            byPreset[id] = {
+                entries: savedEntries,
+                activeIndex: Math.min(Math.max(savedIndex, 0), savedEntries.length - 1),
+            };
+        });
+    }
+
     return {
         enabled: Boolean(value?.enabled),
         entries,
         activeIndex,
         content: entries[activeIndex],
+        byPreset,
     };
 }
 
@@ -1413,9 +1433,14 @@ function purgeDeletedPreset(scope, presetId, deletedContent) {
         const content = typeof entry.direction?.content === "string" ? entry.direction.content : "";
         const wasOpen = entry.presetId === presetId || (!entry.presetId && hasContent && content === deletedContent);
 
+        const keptHistory = { ...(entry.direction?.byPreset || {}) };
+        delete keptHistory[presetId];
+
         if (wasOpen) {
             entry.presetId = fallbackId;
-            entry.direction = freshDirection();
+            entry.direction = sanitizePlaceholderValue({ ...freshDirection(), byPreset: keptHistory });
+        } else if (entry.direction && typeof entry.direction === "object") {
+            entry.direction.byPreset = keptHistory;
         }
 
         if (Array.isArray(entry.onIds)) entry.onIds = entry.onIds.filter((id) => id !== presetId);
@@ -1956,8 +1981,29 @@ function setupCompactUIEventListeners() {
     function selectPreset(preset) {
         const placeholder = getPopupCurrentPlaceholder();
 
+        // 프리셋마다 ← → 기록을 따로 쓴다: 떠나는 프리셋 기록은 보관하고, 들어가는 프리셋 기록을 꺼낸다
+        flushHistorySession();
+        const prevId = getSelectedPresetId(currentScope) || "";
+        const prevState = getCurrentScopeState(placeholder.key);
+        const byPreset = { ...(prevState.byPreset || {}) };
+        byPreset[prevId || "_none"] = { entries: prevState.entries.slice(), activeIndex: prevState.activeIndex };
+
+        const saved = byPreset[preset.id];
+        const nextEntries = saved ? saved.entries.slice() : [preset.content];
+        if (nextEntries[nextEntries.length - 1] !== preset.content) nextEntries.push(preset.content);
+        capEntries(nextEntries);
+
+        setCurrentScopeState(placeholder.key, {
+            enabled: prevState.enabled,
+            entries: nextEntries,
+            activeIndex: nextEntries.length - 1,
+            byPreset,
+        });
+        sessionSnapshot = null;
+
         setSelectedPresetId(currentScope, preset.id);
         getScopeTextarea(currentScope).val(preset.content).trigger("input");
+        beginHistorySession(getCurrentScopeState(placeholder.key));
         commitDirectionContentNow(placeholder);
         saveSettingsDebounced();
         setPresetListOpen(false);
