@@ -1,32 +1,28 @@
-// 🪄전개지시M 확장 - direction 플레이스홀더 관리 (컴팩트 UI 전용)
 import { extension_settings, getContext } from "../../../extensions.js";
 import { saveSettingsDebounced, eventSource, event_types, characters, this_chid } from "../../../../script.js";
 import { Popup } from "../../../popup.js";
 
 const extensionName = "Direction-Manager-DB";
 const LOG_PREFIX = "[🪄전개지시M]";
-// 실제로 설치된 폴더 경로. 폴더명이 달라도(예: Ptest) settings.html을 이 폴더에서 읽기 위함
 const extensionFolderUrl = new URL(".", import.meta.url).pathname;
 
 const DEFAULT_DIRECTION_PROMPT_CHAT = `<direction>
-- Resume the story based on the director's instructions below.
-- The director only provides drafts; refine them into natural prose instead of directly quoting the sentences.
-- Creatively construct and fill in any parts lacking persuasive causality so that the narrative suggested by the director unfolds smoothly.
+- This is the director's instruction for the next reply. Follow it with the highest priority.
+- Accept any form of instruction—whether it is continuing the story, answering questions, handling OOC requests, applying specific conditions, or setting tone and style. Do exactly as requested without forcing unnecessary story narration.
+- Story drafts: keep dialogue's intent, tone, and key wording, using it as is if it already reads well. Rewrite non-dialogue draft text into natural prose and fill in missing causality.
 
 [Direction(If blank, develop the story as you see fit): {{direction}}]
 </direction>`;
 
 const DEFAULT_DIRECTION_PROMPT_GLOBAL = `<format_rules>
-- These are standing formatting/style rules for every reply in this roleplay. Follow them exactly, without exception, for as long as they are enabled below.
-- Do not quote or restate these rules in your reply; just apply them silently.
+- These are standing rules for every reply in this roleplay. Follow them exactly, without exception.
 
 {{direction}}
 </format_rules>`;
 
 const DEFAULT_DIRECTION_PROMPT_CHAR = `<character_notes>
-- The following are background notes about the characters' current state and the world (situation, emotions, personality, setting).
-- Keep them in mind as quiet background knowledge while writing. They do not need to show up in every reply.
-- Never state, quote, or explain these notes directly. Let them surface only indirectly, through tone, behavior, and small details, and only when it fits the scene.
+- Background knowledge only. Keep in mind while writing.
+- Never state, quote, or explain these notes directly. Let them surface indirectly through tone, behavior, and small details only when relevant.
 
 {{direction}}
 </character_notes>`;
@@ -50,7 +46,14 @@ const DEFAULT_DIRECTION_PROMPT_PLOT_NEXT = `<next_beats>
 {{direction}}
 </next_beats>`;
 
-// v5까지의 캐릭터 기본 프롬프트 (v6 마이그레이션에서 "기본값 그대로인지" 비교용)
+const DEFAULT_DIRECTION_PROMPT_AU = `<world_setting>
+- The following are established facts and rules of this world. Apply them consistently to how characters think, behave, and interact.
+- Show these rules naturally through narration, behavior, and environment rather than lecturing or explaining them directly.
+- If a rule conflicts with a character's core personality, keep the character true to themselves while expressing the rule in a subtle, adapted way.
+
+{{direction}}
+</world_setting>`;
+
 const LEGACY_CHAR_PROMPT_V5 = `<character_notes>
 - The following are ongoing notes about the current situation, emotions, personality, or world details that apply to this conversation for the next several turns.
 - Treat them as established fact and weave them naturally into the story; do not quote them directly or announce that you received notes.
@@ -58,11 +61,43 @@ const LEGACY_CHAR_PROMPT_V5 = `<character_notes>
 {{direction}}
 </character_notes>`;
 
-// v4 이전 단일 프롬프트 시절의 기본값 (v5 마이그레이션 비교용)
+const LEGACY_PROMPTS_V9 = {
+    global: `<format_rules>
+- These are standing formatting/style rules for every reply in this roleplay. Follow them exactly, without exception, for as long as they are enabled below.
+- Do not quote or restate these rules in your reply; just apply them silently.
+
+{{direction}}
+</format_rules>`,
+    au: `<world_setting>
+- The following describes the alternate-universe (AU) rules and worldbuilding of this roleplay (special dynamics, hierarchies, biology, social structure, and so on). Treat them as established facts of this world for as long as they are enabled.
+- Several AU settings may be given at once. Treat them as one combined world and keep them consistent with each other.
+- Apply them consistently to how characters think, behave, and relate to one another, and to how the world responds to them.
+- Never quote, list, or explain these rules in your reply. Let them show only through natural narration, behavior, and small details, as if the world has always worked this way.
+- If a rule seems to conflict with a character's established personality, keep the character true to themselves and adapt how the rule is expressed.
+
+{{direction}}
+</world_setting>`,
+    char: `<character_notes>
+- The following are background notes about the characters' current state and the world (situation, emotions, personality, setting).
+- Keep them in mind as quiet background knowledge while writing. They do not need to show up in every reply.
+- Never state, quote, or explain these notes directly. Let them surface only indirectly, through tone, behavior, and small details, and only when it fits the scene.
+
+{{direction}}
+</character_notes>`,
+    chat: `<direction>
+- Resume the story based on the director's instructions below.
+- The director only provides drafts; refine them into natural prose instead of directly quoting the sentences.
+- Creatively construct and fill in any parts lacking persuasive causality so that the narrative suggested by the director unfolds smoothly.
+
+[Direction(If blank, develop the story as you see fit): {{direction}}]
+</direction>`,
+};
+
 const DEFAULT_DIRECTION_PROMPT = DEFAULT_DIRECTION_PROMPT_CHAT;
 
 const DEFAULT_DIRECTION_PROMPTS = {
     global: DEFAULT_DIRECTION_PROMPT_GLOBAL,
+    au: DEFAULT_DIRECTION_PROMPT_AU,
     char: DEFAULT_DIRECTION_PROMPT_CHAR,
     plotMain: DEFAULT_DIRECTION_PROMPT_PLOT_MAIN,
     plotNext: DEFAULT_DIRECTION_PROMPT_PLOT_NEXT,
@@ -80,34 +115,42 @@ function defaultPlaceholderState() {
 
 const SCOPE_LABELS = {
     global: "[Format Rules]",
+    au: "[World Setting]",
     char: "[Character Notes]",
     plotMain: "[Story Direction]",
     plotNext: "[Next Beats]",
     chat: "[Director's Note]",
 };
 
-// 저장·프롬프트 주입 단위(총 5개). 화면의 탭은 아래 TAB_*로 묶는다.
-const SCOPE_ORDER = ["global", "char", "plotMain", "plotNext", "chat"];
+const SCOPE_ORDER = ["global", "au", "char", "plotMain", "plotNext", "chat"];
 
-// 화면 탭: 줄거리 탭 하나 안에 큰 줄거리(plotMain) / 작은 줄거리(plotNext) 두 칸이 들어 있다.
-const TAB_ORDER = ["global", "char", "plot", "chat"];
+const TAB_ORDER = ["global", "au", "char", "plot", "chat"];
 const TAB_SCOPES = {
     global: ["global"],
+    au: ["au"],
     char: ["char"],
     plot: ["plotMain", "plotNext"],
     chat: ["chat"],
 };
 
 // 숫자가 작을수록 최신 메시지에 가깝다 (0 = 맨 끝)
-const DEFAULT_PROMPT_DEPTHS = { global: 0, char: 2, plotMain: 4, plotNext: 3, chat: 1 };
-// v1.6 이전 기본값 (이 값 그대로 쓰던 사람만 새 기본값으로 옮겨 준다)
+const DEFAULT_PROMPT_DEPTHS = { global: 0, au: 2, char: 2, plotMain: 4, plotNext: 3, chat: 1 };
 const LEGACY_PROMPT_DEPTHS_V7 = { global: 2, char: 5, plotMain: 3, plotNext: 1, chat: 0 };
 
-// 줄거리 두 칸은 채팅(대화) 단위로 저장된다. settings 안의 보관함 이름.
+const SHARED_SCOPES = {
+    global: { shared: "global", store: "globals" },
+    au: { shared: "au", store: "aus" },
+};
+
+function isPresetScope(scope) {
+    return Boolean(SHARED_SCOPES[scope]);
+}
+
 const PLOT_STORE = { plotMain: "plotMains", plotNext: "plotNexts" };
 
 const SCOPE_PLACEHOLDERS = {
     default: "Direction 내용을 입력하세요...",
+    au: "AU 설정을 적으세요 (예: 오메가버스의 규칙과 설정)",
     plotMain: "전체 방향·결말을 적으세요 (모델이 배경으로만 참고해요)",
     plotNext: "앞으로 몇 챗 분량의 사건을 순서대로 적으세요 (구체적일수록 속도가 잘 맞아요)",
 };
@@ -122,15 +165,16 @@ function getTabScopes(scope) {
     return TAB_SCOPES[scopeToTab(scope)];
 }
 
-// 채팅·줄거리 탭은 프리셋 줄을 빼고 그만큼 입력칸을 쓴다
 function scopeHidesPresets(scope) {
-    return scope === "chat" || scopeToTab(scope) === "plot";
+    return !isPresetScope(scope);
 }
 
-// 기록에 남는 항목의 최대 개수(현재 보고 있는 칸 포함). 화면에는 N/5로 표시된다.
+function usesFreeSize(scope) {
+    return scope === "chat" || scope === "char";
+}
+
 const HISTORY_TOTAL_MAX = 5;
 const HISTORY_MIN_CHARS = 1;
-// 구버전 데이터({content, history} 형태) 호환용
 const HISTORY_MAX = HISTORY_TOTAL_MAX - 1;
 
 function defaultScopeState() {
@@ -141,18 +185,19 @@ function defaultScopeState() {
 
 const defaultSettings = {
     global: defaultScopeState(),
+    au: defaultScopeState(),
+    aus: {},
     chars: {},
     chats: {},
     plotMains: {},
     plotNexts: {},
     globals: {},
-    presetPins: { global: "", char: "" },
+    presetPins: { global: [], au: [] },
     presets: {
-        direction: { global: [], char: [], plotMain: [], plotNext: [], chat: [] },
+        direction: { global: [], au: [], char: [], plotMain: [], plotNext: [], chat: [] },
     },
     extensionEnabled: true,
     directionPrompt: { ...DEFAULT_DIRECTION_PROMPTS },
-    // 0: Chat History 끝에 삽입, >0: 끝에서 N번째 위치에 삽입
     promptDepth: { ...DEFAULT_PROMPT_DEPTHS },
     lastScope: "chat",
     _migratedV2: false,
@@ -162,11 +207,14 @@ const defaultSettings = {
     _migratedV6: false,
     _migratedV7: false,
     _migratedV8: false,
+    _migratedV9: false,
+    _migratedV10: false,
+    _migratedV11: false,
 };
 
 let currentScope = "chat";
 function textareaHeightGroup(scope) {
-    if (scope === "chat") return "chat";
+    if (usesFreeSize(scope)) return "chat";
     if (scopeToTab(scope) === "plot") return "plot";
     return "shared";
 }
@@ -206,12 +254,9 @@ function defaultTextareaHeightPx() {
     return window.innerWidth <= 480 ? "130px" : "160px";
 }
 
-// 채팅 탭은 직접 리사이즈한 적이 없으면 (공용 높이 + 프리셋 줄 높이)로 맞춰 팝업 크기를 동일하게 유지
-// 줄거리 탭: 라벨 2줄(18px×2) + 칸 사이 간격(3px×3)을 뺀 만큼을 큰 줄거리 4 : 작은 줄거리 6으로 나눈다
 const PLOT_CHROME_PX = 45;
 const PLOT_MAIN_HEIGHT_RATIO = 0.4;
 
-// 채팅·줄거리 탭은 직접 리사이즈한 적이 없으면 (공용 높이 + 프리셋 줄 높이)로 맞춰 팝업 크기를 동일하게 유지
 function restoreTextareaHeightForCurrentScope() {
     if (!compactUIPopup) return;
 
@@ -231,7 +276,7 @@ function restoreTextareaHeightForCurrentScope() {
         return;
     }
 
-    if (currentScope === "chat" && !chatHeightIsCustom) {
+    if (usesFreeSize(currentScope) && !chatHeightIsCustom) {
         textarea[0].style.height = `${Math.round(sharedPx + cachedPresetRowHeight)}px`;
         return;
     }
@@ -240,7 +285,6 @@ function restoreTextareaHeightForCurrentScope() {
     textarea[0].style.height = compactUITextareaHeights[group] || defaultTextareaHeightPx();
 }
 
-// 팝업을 열 때 한 번만 계산. 키보드 상태와 무관하게 screen.availHeight 기준.
 function applyTextareaHeightCap() {
     if (!compactUIPopup) return;
 
@@ -263,9 +307,6 @@ function applyTextareaHeightCap() {
 
     textarea.css("max-height", `${maxTextareaHeight}px`);
 }
-// 타이핑 도중(팝업이 최신 칸을 보고 있을 때) "이번 세션을 시작하기 전 내용"을 기억해둔다.
-// 팝업을 닫거나 범위를 바꿀 때, 이 스냅샷을 현재 칸 "바로 앞"에 끼워 넣어 새 기록으로 확정한다.
-// entries의 순서 자체는 절대 바뀌지 않는다 — 탐색은 activeIndex만 움직인다.
 let sessionSnapshot = null;
 
 function isMeaningfulHistoryText(text) {
@@ -279,13 +320,11 @@ function capEntries(entries) {
     return entries;
 }
 
-// 팝업을 열거나(스코프 전환 포함) ←/→로 위치를 옮긴 직후 호출: 지금 위치를 새 세션의 기준점으로 삼는다.
 function beginHistorySession(scopedValue) {
     const lastIndex = scopedValue.entries.length - 1;
     sessionSnapshot = scopedValue.activeIndex === lastIndex ? scopedValue.entries[lastIndex] : null;
 }
 
-// 팝업 닫기 / 범위 전환 직전: 세션 시작 시점 내용이 지금과 다르면 새 기록 한 칸으로 확정한다.
 function flushHistorySession() {
     if (sessionSnapshot === null) return;
 
@@ -316,8 +355,6 @@ function flushHistorySession() {
     sessionSnapshot = null;
 }
 
-// ←/→: 목록 순서는 그대로 두고 보고 있는 위치(activeIndex)만 옮긴다. 이 위치는 저장되어
-// 팝업을 닫았다 다시 열어도 유지된다.
 function navigateHistory(direction) {
     if (!compactUIPopup) return;
 
@@ -342,11 +379,9 @@ function navigateHistory(direction) {
     updateAppliedIndicator();
     refreshPresetControls();
 }
-// ST 네이티브 Popup이 떠 있는 동안 true (바깥 클릭으로 컴팩트 UI가 닫히지 않게 함)
 let isNativePopupOpen = false;
 let compactUIApplyDebounceTimer = null;
 let promptEditorScope = "global";
-// 확장 설정 패널에서 고쳤지만 아직 저장하지 않은 프롬프트(범위별)
 let promptDrafts = {};
 
 const placeholders = [
@@ -371,9 +406,6 @@ function sanitizePlaceholderValue(value) {
     if (Array.isArray(value?.entries) && value.entries.length) {
         entries = value.entries.filter((item) => typeof item === "string");
     } else {
-        // 구버전({content, history} 또는 {content, previousContent}) 호환:
-        // 예전 history는 "현재 내용 제외, 오래된 것 → 최신" 순서였으므로 그대로 앞에 붙이고
-        // content를 맨 뒤(최신)에 둔다.
         let oldHistory = [];
 
         if (Array.isArray(value?.history)) {
@@ -401,10 +433,21 @@ function sanitizePlaceholderValue(value) {
 
 function sanitizeScopeState(scopeState) {
     const source = scopeState || {};
-    return {
+    const state = {
         direction: sanitizePlaceholderValue(source.direction),
         presetId: typeof source.presetId === "string" ? source.presetId : "",
     };
+
+    if (Array.isArray(source.onIds)) {
+        state.onIds = source.onIds.filter((id) => typeof id === "string");
+    }
+
+    return state;
+}
+
+function toIdArray(value) {
+    if (Array.isArray(value)) return value.filter((id) => typeof id === "string" && id);
+    return typeof value === "string" && value ? [value] : [];
 }
 
 function sanitizePresetList(arr) {
@@ -424,6 +467,7 @@ function sanitizeScopePresets(scopePresets) {
 
     return {
         global: sanitizePresetList(src.global),
+        au: sanitizePresetList(src.au),
         char: sanitizePresetList(src.char),
         plotMain: sanitizePresetList(src.plotMain),
         plotNext: sanitizePresetList(src.plotNext),
@@ -464,7 +508,6 @@ function pruneRemovedPlaceholders() {
 }
 
 function normalizePromptDepth(raw) {
-    // 구버전: 숫자 하나를 모든 범위에 공통 적용했음 (줄거리 두 칸은 이 시절에 없었으므로 새 기본값 사용)
     if (Number.isInteger(raw)) {
         return {
             ...DEFAULT_PROMPT_DEPTHS,
@@ -569,7 +612,7 @@ function getCurrentChatKey() {
 }
 
 function getScopeAvailability(scope) {
-    if (scope === "global") {
+    if (isPresetScope(scope)) {
         return { available: true, reason: "" };
     }
 
@@ -584,6 +627,8 @@ function normalizeSettings() {
     const settings = getSettings();
 
     settings.global = sanitizeScopeState(settings.global);
+    settings.au = sanitizeScopeState(settings.au);
+    settings.aus = settings.aus && typeof settings.aus === "object" ? settings.aus : {};
     settings.chars = settings.chars && typeof settings.chars === "object" ? settings.chars : {};
     settings.chats = settings.chats && typeof settings.chats === "object" ? settings.chats : {};
     Object.values(PLOT_STORE).forEach((storeKey) => {
@@ -593,8 +638,8 @@ function normalizeSettings() {
     settings.globals = settings.globals && typeof settings.globals === "object" ? settings.globals : {};
     const pins = settings.presetPins && typeof settings.presetPins === "object" ? settings.presetPins : {};
     settings.presetPins = {
-        global: typeof pins.global === "string" ? pins.global : "",
-        char: typeof pins.char === "string" ? pins.char : "",
+        global: toIdArray(pins.global),
+        au: toIdArray(pins.au),
     };
     settings.extensionEnabled = typeof settings.extensionEnabled === "boolean" ? settings.extensionEnabled : defaultSettings.extensionEnabled;
     settings.directionPrompt = normalizeDirectionPromptObject(settings.directionPrompt);
@@ -607,6 +652,13 @@ function normalizeSettings() {
     settings._migratedV6 = Boolean(settings._migratedV6);
     settings._migratedV7 = Boolean(settings._migratedV7);
     settings._migratedV8 = Boolean(settings._migratedV8);
+    settings._migratedV9 = Boolean(settings._migratedV9);
+    settings._migratedV10 = Boolean(settings._migratedV10);
+    settings._migratedV11 = Boolean(settings._migratedV11);
+
+    Object.keys(settings.aus).forEach((key) => {
+        settings.aus[key] = sanitizeScopeState(settings.aus[key]);
+    });
 
     Object.keys(settings.globals).forEach((key) => {
         settings.globals[key] = sanitizeScopeState(settings.globals[key]);
@@ -656,7 +708,6 @@ function migrateV1SettingsIfNeeded() {
     return true;
 }
 
-// v2까지 프리셋은 범위 구분 없이 하나 → 세 범위 모두에 복사
 function migrateV3PresetsIfNeeded() {
     const settings = getSettings();
 
@@ -688,7 +739,6 @@ function migrateV3PresetsIfNeeded() {
     return true;
 }
 
-// v3까지 캐릭터 범위는 캐릭터 카드 단위로 저장됨 → v4부터 채팅 단위. 옮길 방법이 없어 예전 데이터 정리
 function migrateV4LegacyCharScopeIfNeeded() {
     const settings = getSettings();
 
@@ -714,7 +764,6 @@ function migrateV4LegacyCharScopeIfNeeded() {
     return true;
 }
 
-// v4까지 프롬프트는 문자열 하나 → 범위별 객체로 변경. 커스텀했던 값은 "채팅" 범위로 이전
 function migrateV5DirectionPromptIfNeeded() {
     const settings = getSettings();
 
@@ -737,9 +786,6 @@ function migrateV5DirectionPromptIfNeeded() {
     return true;
 }
 
-// v6: 줄거리 탭(큰 줄거리/작은 줄거리) 추가.
-// - 캐릭터 프롬프트가 예전 기본값 그대로면 "은은하게 참고" 새 기본값으로 교체
-// - Depth가 예전 기본값(전부 1) 그대로면 새 기본값으로 교체 (직접 바꾼 값은 건드리지 않음)
 function migrateV6PlotScopesIfNeeded() {
     const settings = getSettings();
 
@@ -766,8 +812,6 @@ function migrateV6PlotScopesIfNeeded() {
     return true;
 }
 
-// v7: 전역 프리셋에 "기본"(고정) 프리셋을 둔다. 채팅방마다 고른 프리셋을 따로 기억하고,
-// 고른 적 없는 채팅방은 고정된 프리셋으로 열린다. 지금까지 쓰던 전역 내용이 그대로 "기본"이 된다.
 function migrateV7DefaultPresetIfNeeded() {
     const settings = getSettings();
 
@@ -784,14 +828,12 @@ function migrateV7DefaultPresetIfNeeded() {
         list.unshift(pinned);
     }
 
-    settings.presetPins.global = pinned.id;
+    settings.presetPins.global = [pinned.id];
     settings._migratedV7 = true;
     console.log(`${LOG_PREFIX} 전역 "기본" 프리셋을 만들고 고정했습니다.`);
     return true;
 }
 
-// v8: 삽입 위치(Depth) 기본값 변경 (전역 0 / 채팅 1 / 캐릭터 2 / 작은 줄거리 3 / 큰 줄거리 4).
-// 예전 기본값 그대로 쓰던 경우에만 새 기본값으로 바꾸고, 직접 바꾼 값은 건드리지 않는다.
 function migrateV8DepthDefaultsIfNeeded() {
     const settings = getSettings();
 
@@ -812,6 +854,91 @@ function migrateV8DepthDefaultsIfNeeded() {
     return true;
 }
 
+function migrateV9AuScopeIfNeeded() {
+    const settings = getSettings();
+
+    if (settings._migratedV9) {
+        return false;
+    }
+
+    const lists = settings.presets.direction;
+
+    if (lists.char.length > 0 && lists.au.length === 0) {
+        lists.au = lists.char;
+        lists.char = [];
+        console.log(`${LOG_PREFIX} 캐릭터 프리셋 ${lists.au.length}개를 AU 프리셋으로 옮겼습니다.`);
+    }
+
+    Object.keys(settings.globals).forEach((key) => {
+        const entry = settings.globals[key];
+
+        if (Array.isArray(entry.onIds)) return;
+
+        const selectedId = resolveSelectedId("global", entry);
+        entry.onIds = selectedId ? [selectedId] : [];
+    });
+
+    settings._migratedV9 = true;
+    return true;
+}
+
+function migrateV10ShortPromptsIfNeeded() {
+    const settings = getSettings();
+
+    if (settings._migratedV10) {
+        return false;
+    }
+
+    const prompts = settings.directionPrompt;
+
+    if (prompts && typeof prompts === "object") {
+        Object.keys(LEGACY_PROMPTS_V9).forEach((scope) => {
+            if (prompts[scope] === LEGACY_PROMPTS_V9[scope]) {
+                prompts[scope] = DEFAULT_DIRECTION_PROMPTS[scope];
+            }
+        });
+    }
+
+    settings._migratedV10 = true;
+    console.log(`${LOG_PREFIX} 기본 프롬프트를 짧은 버전으로 교체했습니다. (직접 고친 프롬프트는 그대로)`);
+    return true;
+}
+
+function migrateV11MergeCharPresetsIfNeeded() {
+    const settings = getSettings();
+
+    if (settings._migratedV11) {
+        return false;
+    }
+
+    const lists = settings.presets.direction;
+    const leftover = lists.char;
+
+    if (leftover.length > 0) {
+        settings.presetBackupV11 = { char: cloneSettings(leftover) };
+
+        const seen = new Set(lists.au.map((preset) => `${preset.name}\n${preset.content}`));
+        const usedIds = new Set(lists.au.map((preset) => preset.id));
+        let moved = 0;
+
+        leftover.forEach((preset) => {
+            const signature = `${preset.name}\n${preset.content}`;
+
+            if (seen.has(signature)) return;
+
+            seen.add(signature);
+            lists.au.push({ ...preset, id: usedIds.has(preset.id) ? generatePresetId() : preset.id });
+            moved += 1;
+        });
+
+        lists.char = [];
+        console.log(`${LOG_PREFIX} 캐릭터 프리셋 ${leftover.length}개 중 ${moved}개를 AU 프리셋에 합쳤습니다. (원본은 presetBackupV11에 보관)`);
+    }
+
+    settings._migratedV11 = true;
+    return true;
+}
+
 async function loadSettings() {
     const settings = getSettings();
 
@@ -828,32 +955,36 @@ async function loadSettings() {
     normalizeSettings();
     const migratedV7 = migrateV7DefaultPresetIfNeeded();
     const migratedV8 = migrateV8DepthDefaultsIfNeeded();
+    const migratedV9 = migrateV9AuScopeIfNeeded();
+    const migratedV10 = migrateV10ShortPromptsIfNeeded();
+    const migratedV11 = migrateV11MergeCharPresetsIfNeeded();
 
-    if (migrated || migratedV3 || migratedV4 || migratedV5 || migratedV6 || migratedV7 || migratedV8 || pruned) {
+    if (migrated || migratedV3 || migratedV4 || migratedV5 || migratedV6 || migratedV7 || migratedV8 || migratedV9 || migratedV10 || migratedV11 || pruned) {
         saveSettingsDebounced();
     }
 }
 
-// 전역 범위: 켜기/끄기는 모든 채팅방 공통, 내용과 "어떤 프리셋을 열어뒀는지"는 채팅방별.
-// 고른 적 없는 채팅방은 고정(📌) 프리셋의 내용으로 열린다.
-function getGlobalScoped() {
+function getSharedScoped(scope) {
     const settings = getSettings();
-    const shared = sanitizeScopeState(settings.global);
+    const { shared: sharedKey, store: storeKey } = SHARED_SCOPES[scope];
+    const shared = sanitizeScopeState(settings[sharedKey]);
     const key = getCurrentChatKey();
 
     if (!key) {
         return shared;
     }
 
-    const entry = settings.globals?.[key];
+    const entry = settings[storeKey]?.[key];
     let direction;
     let presetId = "";
+    let onIds;
 
     if (entry) {
         direction = sanitizePlaceholderValue(entry.direction);
         presetId = typeof entry.presetId === "string" ? entry.presetId : "";
+        onIds = Array.isArray(entry.onIds) ? entry.onIds : undefined;
     } else {
-        const pinned = getPinnedPreset("global");
+        const pinned = getFirstPinnedPreset(scope);
 
         if (pinned) {
             direction = sanitizePlaceholderValue({ entries: [pinned.content], activeIndex: 0 });
@@ -866,35 +997,41 @@ function getGlobalScoped() {
     return sanitizeScopeState({
         direction: { ...direction, enabled: shared.direction.enabled },
         presetId,
+        onIds,
     });
 }
 
-function ensureGlobalScoped() {
+function ensureSharedScoped(scope) {
     const settings = getSettings();
-    settings.global = sanitizeScopeState(settings.global);
+    const { shared: sharedKey, store: storeKey } = SHARED_SCOPES[scope];
+    settings[sharedKey] = sanitizeScopeState(settings[sharedKey]);
     const key = getCurrentChatKey();
 
     if (!key) {
-        return settings.global;
+        return settings[sharedKey];
     }
 
-    settings.globals = settings.globals && typeof settings.globals === "object" ? settings.globals : {};
+    settings[storeKey] = settings[storeKey] && typeof settings[storeKey] === "object" ? settings[storeKey] : {};
 
-    if (!settings.globals[key]) {
-        const current = getGlobalScoped();
-        settings.globals[key] = sanitizeScopeState({ direction: current.direction, presetId: current.presetId });
+    if (!settings[storeKey][key]) {
+        const current = getSharedScoped(scope);
+        settings[storeKey][key] = sanitizeScopeState({
+            direction: current.direction,
+            presetId: current.presetId,
+            onIds: getEffectiveOnIds(scope, current),
+        });
     }
 
-    const entry = sanitizeScopeState(settings.globals[key]);
-    settings.globals[key] = entry;
+    const entry = sanitizeScopeState(settings[storeKey][key]);
+    settings[storeKey][key] = entry;
 
     return {
         get direction() {
-            return { ...entry.direction, enabled: settings.global.direction.enabled };
+            return { ...entry.direction, enabled: settings[sharedKey].direction.enabled };
         },
         set direction(value) {
             const next = sanitizePlaceholderValue(value);
-            settings.global.direction = sanitizePlaceholderValue({ ...settings.global.direction, enabled: next.enabled });
+            settings[sharedKey].direction = sanitizePlaceholderValue({ ...settings[sharedKey].direction, enabled: next.enabled });
             entry.direction = { ...next };
         },
         get presetId() {
@@ -903,14 +1040,20 @@ function ensureGlobalScoped() {
         set presetId(value) {
             entry.presetId = typeof value === "string" ? value : "";
         },
+        get onIds() {
+            return entry.onIds;
+        },
+        set onIds(value) {
+            entry.onIds = toIdArray(value);
+        },
     };
 }
 
 function ensureScopedSettings(scope) {
     const settings = getSettings();
 
-    if (scope === "global") {
-        return ensureGlobalScoped();
+    if (isPresetScope(scope)) {
+        return ensureSharedScoped(scope);
     }
 
     if (scope === "char") {
@@ -938,8 +1081,8 @@ function ensureScopedSettings(scope) {
 function getScopedSettings(scope) {
     const settings = getSettings();
 
-    if (scope === "global") {
-        return getGlobalScoped();
+    if (isPresetScope(scope)) {
+        return getSharedScoped(scope);
     }
 
     if (scope === "char") {
@@ -969,12 +1112,20 @@ function isValidEnabledContent(value) {
     return Boolean(value?.enabled && typeof value?.content === "string" && value.content.trim() !== "");
 }
 
+function getInjectionPlaceholder(scope, placeholderKey) {
+    const value = getScopedPlaceholder(scope, placeholderKey);
+
+    if (!value || !isPresetScope(scope)) return value;
+
+    return { ...value, content: composePresetContent(scope) };
+}
+
 function resolveCombinedContent(placeholderKey) {
     const parts = [];
     const activeScopes = [];
 
     SCOPE_ORDER.forEach((scope) => {
-        const value = getScopedPlaceholder(scope, placeholderKey);
+        const value = getInjectionPlaceholder(scope, placeholderKey);
 
         if (isValidEnabledContent(value)) {
             parts.push(`${SCOPE_LABELS[scope]}\n${value.content.trim()}`);
@@ -1140,28 +1291,28 @@ function getPresetList(placeholderKey, scope) {
     return settings.presets[placeholderKey]?.[scope] || [];
 }
 
-// 📌 고정된 프리셋 (지금은 전역 범위에서만 사용)
-function getPinnedPreset(scope) {
-    const pinId = getSettings().presetPins?.[scope] || "";
-    if (!pinId) return null;
-    return getPresetList("direction", scope).find((preset) => preset.id === pinId) || null;
+function getPinnedIds(scope) {
+    return toIdArray(getSettings().presetPins?.[scope]);
 }
 
-// 이 채팅방에서 지금 열어둔 프리셋 id. 저장된 선택 → 고정 프리셋 → (예전 데이터) 내용이 같은 프리셋 순으로 찾는다.
-function getSelectedPresetId(scope) {
-    const placeholder = getPopupCurrentPlaceholder();
-    const list = getPresetList(placeholder.key, scope);
-    const scoped = getScopedSettings(scope);
+function getFirstPinnedPreset(scope) {
+    const ids = getPinnedIds(scope);
+    if (!ids.length) return null;
+    return getPresetList("direction", scope).find((preset) => ids.includes(preset.id)) || null;
+}
+
+function resolveSelectedId(scope, scoped) {
+    const list = getPresetList("direction", scope);
     const storedId = scoped?.presetId || "";
 
     if (storedId && list.some((preset) => preset.id === storedId)) {
         return storedId;
     }
 
-    const pinned = getPinnedPreset(scope);
+    const pinned = getFirstPinnedPreset(scope);
     if (pinned) return pinned.id;
 
-    const content = scoped ? sanitizePlaceholderValue(scoped[placeholder.key]).content : "";
+    const content = scoped ? sanitizePlaceholderValue(scoped.direction).content : "";
 
     if (content) {
         const matched = list.find((preset) => preset.content === content);
@@ -1171,15 +1322,61 @@ function getSelectedPresetId(scope) {
     return "";
 }
 
+function getSelectedPresetId(scope) {
+    return resolveSelectedId(scope, getScopedSettings(scope));
+}
+
+function getEffectiveOnIds(scope, scoped) {
+    const ids = Array.isArray(scoped?.onIds) ? scoped.onIds : getPinnedIds(scope);
+    const set = new Set(ids);
+    return getPresetList("direction", scope).filter((preset) => set.has(preset.id)).map((preset) => preset.id);
+}
+
 function setSelectedPresetId(scope, presetId) {
     const scoped = ensureScopedSettings(scope);
     if (scoped) scoped.presetId = presetId;
 }
 
-// 프리셋 내용을 저장(덮어쓰기)하면, 그 프리셋을 열어두고 아직 안 고친 채팅방도 새 내용을 따라가게 한다.
+function setPresetOn(scope, presetId, on) {
+    const scoped = ensureScopedSettings(scope);
+    if (!scoped) return false;
+
+    const next = new Set(getEffectiveOnIds(scope, getScopedSettings(scope)));
+
+    if (on) next.add(presetId);
+    else next.delete(presetId);
+
+    scoped.onIds = getPresetList("direction", scope).filter((preset) => next.has(preset.id)).map((preset) => preset.id);
+    return true;
+}
+
+function composePresetContent(scope) {
+    const scoped = getScopedSettings(scope);
+    if (!scoped) return "";
+
+    const draft = typeof scoped.direction.content === "string" ? scoped.direction.content : "";
+    const currentId = resolveSelectedId(scope, scoped);
+    const onIds = new Set(getEffectiveOnIds(scope, scoped));
+    const parts = [];
+
+    getPresetList("direction", scope).forEach((preset) => {
+        if (!onIds.has(preset.id)) return;
+
+        const text = preset.id === currentId ? draft : preset.content;
+        if (typeof text === "string" && text.trim()) parts.push(text.trim());
+    });
+
+    if (!currentId && draft.trim()) parts.push(draft.trim());
+
+    return parts.join("\n\n");
+}
+
+function presetStoreOf(scope) {
+    return SHARED_SCOPES[scope]?.store || "";
+}
+
 function propagatePresetContent(scope, presetId, oldContent, newContent) {
-    const settings = getSettings();
-    const store = scope === "global" ? settings.globals : settings.chars;
+    const store = getSettings()[presetStoreOf(scope)];
 
     Object.values(store || {}).forEach((entry) => {
         if (!entry || entry.presetId !== presetId) return;
@@ -1193,16 +1390,45 @@ function propagatePresetContent(scope, presetId, oldContent, newContent) {
     });
 }
 
-function clearPresetReferences(scope, presetId) {
+function purgeDeletedPreset(scope, presetId, deletedContent) {
     const settings = getSettings();
-    const store = scope === "global" ? settings.globals : settings.chars;
+    const storeKey = presetStoreOf(scope);
+    const store = settings[storeKey];
+    const sharedKey = SHARED_SCOPES[scope]?.shared;
+    const hasContent = typeof deletedContent === "string" && deletedContent.trim() !== "";
+
+    // ★에서 먼저 빼야 되돌아갈 프리셋에 지운 프리셋이 끼지 않는다
+    if (settings.presetPins) {
+        settings.presetPins[scope] = getPinnedIds(scope).filter((id) => id !== presetId);
+    }
+
+    const fallback = getFirstPinnedPreset(scope);
+    const fallbackId = fallback ? fallback.id : "";
+    const fallbackContent = fallback ? fallback.content : "";
+    const freshDirection = () => sanitizePlaceholderValue({ entries: [fallbackContent], activeIndex: 0 });
 
     Object.values(store || {}).forEach((entry) => {
-        if (entry && entry.presetId === presetId) entry.presetId = "";
+        if (!entry) return;
+
+        const content = typeof entry.direction?.content === "string" ? entry.direction.content : "";
+        const wasOpen = entry.presetId === presetId || (!entry.presetId && hasContent && content === deletedContent);
+
+        if (wasOpen) {
+            entry.presetId = fallbackId;
+            entry.direction = freshDirection();
+        }
+
+        if (Array.isArray(entry.onIds)) entry.onIds = entry.onIds.filter((id) => id !== presetId);
     });
+
+    const shared = sharedKey ? settings[sharedKey] : null;
+    const sharedContent = typeof shared?.direction?.content === "string" ? shared.direction.content : "";
+
+    if (shared && hasContent && sharedContent === deletedContent) {
+        shared.direction = { ...freshDirection(), enabled: Boolean(shared.direction.enabled) };
+    }
 }
 
-// 저장 버튼(💾): 열어둔 프리셋과 내용이 달라지면 불이 켜진다.
 function refreshPresetControls() {
     if (!compactUIPopup || scopeHidesPresets(currentScope)) return;
 
@@ -1215,7 +1441,6 @@ function refreshPresetControls() {
     compactUIPopup.find(".dm-compact--preset-rename, .dm-compact--preset-delete").prop("disabled", !preset);
 }
 
-// 타이핑 중에는 매 글자마다 계산하지 않고, 멈춘 뒤 한 번만 갱신한다 (렉 방지)
 let presetControlsTimer = null;
 
 function schedulePresetControlsRefresh() {
@@ -1223,33 +1448,37 @@ function schedulePresetControlsRefresh() {
     presetControlsTimer = setTimeout(refreshPresetControls, 150);
 }
 
-// ---- 프리셋 목록 (직접 만든 드롭다운): 줄마다 이름 · ▲▼(순서 편집 중) · ★(기본 지정) · ◯(선택)
 let presetListOpen = false;
 let presetReorderMode = false;
+
+function presetScopeEmptyLabel(scope) {
+    return scope === "au" ? "🌐 어떤 AU로 할까?" : "✨️ 어떤 지시를 내릴까?";
+}
 
 function buildPresetListHtml() {
     const placeholder = getPopupCurrentPlaceholder();
     const presets = getPresetList(placeholder.key, currentScope);
-    const pinnedId = getPinnedPreset(currentScope)?.id || "";
+    const pinnedIds = new Set(getPinnedIds(currentScope));
+    const onIds = new Set(getEffectiveOnIds(currentScope, getScopedSettings(currentScope)));
     const selectedId = getSelectedPresetId(currentScope);
-    const canPin = currentScope === "global";
 
     const rows = presets.map((preset, index) => {
         const isSelected = preset.id === selectedId;
-        const isPinned = preset.id === pinnedId;
+        const isPinned = pinnedIds.has(preset.id);
+        const isOn = onIds.has(preset.id);
         const move = presetReorderMode
-            ? `<span class="dm-compact--move${index === 0 ? " dm-compact--move-off" : ""}" data-act="up">▲</span><span class="dm-compact--move${index === presets.length - 1 ? " dm-compact--move-off" : ""}" data-act="down">▼</span>`
+            ? `<span class="dm-compact--move${index === 0 ? " dm-compact--move-off" : ""}" data-act="up">▲</span>`
+                + `<span class="dm-compact--move${index === presets.length - 1 ? " dm-compact--move-off" : ""}" data-act="down">▼</span>`
+                + `<span class="dm-compact--move dm-compact--move-del" data-act="del" title="프리셋 삭제"><i class="fa-solid fa-trash"></i></span>`
             : "";
-        const star = canPin
-            ? `<span class="dm-compact--star${isPinned ? " dm-compact--star-on" : ""}" data-act="pin" title="기본으로 지정">${isPinned ? "★" : "☆"}</span>`
-            : "";
+        const star = `<span class="dm-compact--star${isPinned ? " dm-compact--star-on" : ""}" data-act="pin" title="새 채팅방에서 처음부터 켜짐">${isPinned ? "★" : "☆"}</span>`;
+        const led = `<span class="dm-compact--led-hit" data-act="toggle" title="${isOn ? "끄기" : "켜기"}"><span class="dm-compact--led${isOn ? " dm-compact--led-on" : ""}"></span></span>`;
 
         return `<div class="dm-compact--preset-item${isSelected ? " dm-compact--preset-item-sel" : ""}" data-id="${preset.id}">`
-            + `<span class="dm-compact--preset-item-name">${escapeHtml(preset.name)}</span>${move}${star}`
-            + `<span class="dm-compact--dot${isSelected ? " dm-compact--dot-on" : ""}"></span></div>`;
+            + `${led}<span class="dm-compact--preset-item-name">${escapeHtml(preset.name)}</span>${move}${star}</div>`;
     }).join("");
 
-    const head = `<div class="dm-compact--preset-list-head"><span>프리셋 ${presets.length}개</span>`
+    const head = `<div class="dm-compact--preset-list-head"><span>프리셋 ${presets.length}개 · 켜짐 ${onIds.size}개</span>`
         + `<button type="button" data-act="reorder">${presetReorderMode ? "✔ 완료" : "↕ 순서 편집"}</button></div>`;
 
     return head + (rows || '<div class="dm-compact--preset-empty">저장된 프리셋이 없어요</div>');
@@ -1280,10 +1509,12 @@ function renderPresetSelect() {
     const placeholder = getPopupCurrentPlaceholder();
     const selectedId = getSelectedPresetId(currentScope);
     const preset = selectedId ? getPresetList(placeholder.key, currentScope).find((item) => item.id === selectedId) : null;
-    const pinnedId = getPinnedPreset(currentScope)?.id || "";
-    const star = preset && preset.id === pinnedId ? '<span class="dm-compact--star dm-compact--star-on">★</span>' : "";
+    const isPinned = Boolean(preset) && getPinnedIds(currentScope).includes(preset.id);
+    const isOn = Boolean(preset) && getEffectiveOnIds(currentScope, getScopedSettings(currentScope)).includes(preset.id);
+    const star = isPinned ? '<span class="dm-compact--star dm-compact--star-on">★</span>' : "";
+    const led = preset ? `<span class="dm-compact--led dm-compact--led-inline${isOn ? " dm-compact--led-on" : ""}"></span>` : "";
 
-    compactUIPopup.find(".dm-compact--preset-current-name").html(preset ? `${star}${escapeHtml(preset.name)}` : "✨️ 어떤 지시를 내릴까?");
+    compactUIPopup.find(".dm-compact--preset-current-name").html(preset ? `${led}${star}${escapeHtml(preset.name)}` : presetScopeEmptyLabel(currentScope));
 
     if (presetListOpen) renderPresetList();
     refreshPresetControls();
@@ -1306,7 +1537,6 @@ function updateAppliedIndicator() {
     refreshHistoryButtons();
 }
 
-// 줄거리 탭에서 지금 편집 중인 칸(큰 줄거리/작은 줄거리)을 강조
 function updateActiveFieldHighlight() {
     if (!compactUIPopup) return;
 
@@ -1315,8 +1545,6 @@ function updateActiveFieldHighlight() {
     });
 }
 
-// 줄거리 탭에서 다른 칸으로 포커스가 옮겨졌을 때: 이전 칸의 기록을 확정하고 헤더(←/→, 체크박스)가 새 칸을 가리키게 한다.
-// 입력창 내용은 건드리지 않는다(커서가 튀지 않게).
 function switchActiveField(scope) {
     if (!compactUIPopup || scope === currentScope) return;
 
@@ -1352,8 +1580,8 @@ function syncPopupByCurrentState() {
 
     compactUIPopup.find(".dm-compact--radio").prop("checked", settings.enabled);
     compactUIPopup.toggleClass("dm-compact--plot-tab", isPlot);
+    compactUIPopup.toggleClass("dm-compact--scope-off", !settings.enabled);
 
-    // 위 칸은 줄거리 탭에서는 큰 줄거리, 다른 탭에서는 현재 범위. 아래 칸은 줄거리 탭에서만 보인다.
     [
         { slot: "main", scope: isPlot ? "plotMain" : currentScope },
         { slot: "next", scope: "plotNext" },
@@ -1432,7 +1660,7 @@ function closeCompactUIPopup() {
     }
 
     if (compactUIButton) {
-        // class 대신 data 속성 사용: 서드파티 UI 스크립트가 classList로 버튼을 식별하는 경우 위치 설정이 초기화되는 것을 방지
+        // classList 대신 data 속성 사용: 서드파티 UI 스크립트가 버튼 위치를 초기화하지 않게
         compactUIButton.removeAttr("data-dm-popup-open");
     }
 
@@ -1478,7 +1706,8 @@ function showCompactUIPopup() {
             </div>
 
             <div class="dm-compact--scope-row">
-                <button class="dm-compact--scope-btn" data-tab="global" type="button"><span class="dm-compact--scope-emoji">🌐</span>전역</button>
+                <button class="dm-compact--scope-btn" data-tab="global" type="button"><span class="dm-compact--scope-emoji">📜</span>규칙</button>
+                <button class="dm-compact--scope-btn" data-tab="au" type="button"><span class="dm-compact--scope-emoji">🌐</span>AU</button>
                 <button class="dm-compact--scope-btn" data-tab="char" type="button"><span class="dm-compact--scope-emoji">🎭</span>캐릭터</button>
                 <button class="dm-compact--scope-btn" data-tab="plot" type="button"><span class="dm-compact--scope-emoji">📖</span>줄거리</button>
                 <button class="dm-compact--scope-btn" data-tab="chat" type="button"><span class="dm-compact--scope-emoji">🗨️</span>채팅</button>
@@ -1535,8 +1764,7 @@ function showCompactUIPopup() {
 function setupCompactUIEventListeners() {
     if (!compactUIPopup) return;
 
-    // touchstart에서 preventDefault로 textarea blur(키보드 닫힘)를 막고 핸들러를 직접 실행한 뒤,
-    // 뒤따르는 click은 무시한다(중복 실행 방지). 마우스 환경에서는 click만 사용된다.
+    // touchstart에서 직접 처리해 키보드가 닫히지 않게 하고, 뒤따르는 click은 무시한다
     function bindTapAction(selector, handler) {
         let suppressNextClick = false;
 
@@ -1572,7 +1800,6 @@ function setupCompactUIEventListeners() {
 
         flushHistorySession();
 
-        // 줄거리 탭의 높이는 항상 공용 높이에서 계산하므로 따로 저장하지 않는다.
         const outgoingGroup = textareaHeightGroup(currentScope);
 
         if (outgoingGroup !== "plot") {
@@ -1602,7 +1829,6 @@ function setupCompactUIEventListeners() {
             return;
         }
 
-        // 줄거리 탭처럼 한 탭에 두 칸이 있으면 두 칸을 함께 켜고 끈다.
         getTabScopes(currentScope).forEach((scope) => {
             if (scope === currentScope) return;
 
@@ -1618,13 +1844,13 @@ function setupCompactUIEventListeners() {
 
         const textarea = compactUIPopup.find(".dm-compact--textarea");
         textarea.prop("disabled", !isEnabled);
+        compactUIPopup.toggleClass("dm-compact--scope-off", !isEnabled);
 
         applyPlaceholderToSystem(currentPlaceholder);
         saveSettingsDebounced();
         updateAppliedIndicator();
     });
 
-    // 체크박스도 터치 시 키보드가 닫히므로 직접 토글하고 change를 발생시킨다.
     compactUIPopup.on("touchstart", ".dm-compact--radio", function (e) {
         e.preventDefault();
         const checkbox = $(this);
@@ -1635,9 +1861,8 @@ function setupCompactUIEventListeners() {
         e.preventDefault();
     });
 
-    // 채팅 탭에서 리사이즈 손잡이를 실제로 드래그했는지 감지 (모서리 근처 터치 + 높이 변화 둘 다 확인)
     compactUIPopup.on("mousedown touchstart", ".dm-compact--textarea", function (e) {
-        if (currentScope !== "chat" || chatHeightIsCustom) {
+        if (!usesFreeSize(currentScope) || chatHeightIsCustom) {
             resizeCandidateHeight = null;
             return;
         }
@@ -1665,7 +1890,6 @@ function setupCompactUIEventListeners() {
         const currentPlaceholder = getPopupCurrentPlaceholder();
         const scopedValue = getCurrentScopeState(currentPlaceholder.key);
 
-        // 지금 목록 순서는 그대로 두고, 맨 뒤에 빈 칸을 새로 추가해서 그 칸으로 이동한다.
         scopedValue.entries.push("");
         capEntries(scopedValue.entries);
         scopedValue.activeIndex = scopedValue.entries.length - 1;
@@ -1684,7 +1908,6 @@ function setupCompactUIEventListeners() {
         refreshPresetControls();
     });
 
-    // 줄거리 탭: 포커스가 옮겨진 칸을 "지금 편집 중인 칸"으로 삼는다
     compactUIPopup.on("focusin", ".dm-compact--textarea", function () {
         const fieldScope = $(this).attr("data-scope");
 
@@ -1706,7 +1929,6 @@ function setupCompactUIEventListeners() {
         const lastIndex = scopedValue.entries.length - 1;
 
         if (scopedValue.activeIndex !== lastIndex) {
-            // 이전 칸을 보다가 수정: 기존 항목들은 그대로 두고 맨 뒤에 새 칸으로 분기한다.
             scopedValue.entries.push(newContent);
             capEntries(scopedValue.entries);
             scopedValue.activeIndex = scopedValue.entries.length - 1;
@@ -1722,7 +1944,6 @@ function setupCompactUIEventListeners() {
             return;
         }
 
-        // 매크로 재등록은 비용이 커서 입력이 250ms 멈췄을 때만 반영
         clearTimeout(compactUIApplyDebounceTimer);
         compactUIApplyDebounceTimer = setTimeout(() => {
             commitDirectionContentNow(currentPlaceholder);
@@ -1736,17 +1957,7 @@ function setupCompactUIEventListeners() {
         const placeholder = getPopupCurrentPlaceholder();
 
         setSelectedPresetId(currentScope, preset.id);
-
-        // 프리셋을 고르면 ←/→ 기록을 이 프리셋 내용 기준으로 새로 시작한다.
-        // (이전에 보던 프리셋의 내용이 기록에 끼어들어 ←로 나오는 것을 막는다)
-        const scopedValue = getCurrentScopeState(placeholder.key);
-        scopedValue.entries = [preset.content];
-        scopedValue.activeIndex = 0;
-        scopedValue.content = preset.content;
-        setCurrentScopeState(placeholder.key, scopedValue);
-
-        getScopeTextarea(currentScope).val(preset.content);
-        beginHistorySession(scopedValue);
+        getScopeTextarea(currentScope).val(preset.content).trigger("input");
         commitDirectionContentNow(placeholder);
         saveSettingsDebounced();
         setPresetListOpen(false);
@@ -1755,9 +1966,8 @@ function setupCompactUIEventListeners() {
 
     compactUIPopup.find(".dm-compact--preset-current").on("click", () => setPresetListOpen(!presetListOpen));
 
-    // 목록 안의 모든 동작은 한 곳에서 받는다 (줄마다 리스너를 달지 않는다)
     compactUIPopup.find(".dm-compact--preset-list").on("click", (e) => {
-        // 목록을 다시 그리면 눌린 요소가 사라져서 "팝업 바깥을 눌렀다"로 오해받는다 → 여기서 이벤트를 끝낸다
+        // 목록을 다시 그리면 눌린 요소가 사라져 바깥 클릭으로 오해받으므로 여기서 이벤트를 끝낸다
         e.stopPropagation();
 
         const placeholder = getPopupCurrentPlaceholder();
@@ -1772,10 +1982,21 @@ function setupCompactUIEventListeners() {
         if (act === "reorder") {
             presetReorderMode = !presetReorderMode;
             renderPresetList();
+        } else if (act === "toggle" && index >= 0) {
+            const isOn = getEffectiveOnIds(currentScope, getScopedSettings(currentScope)).includes(id);
+
+            if (setPresetOn(currentScope, id, !isOn)) {
+                commitDirectionContentNow(placeholder);
+                saveSettingsDebounced();
+                renderPresetSelect();
+            }
         } else if (act === "pin" && index >= 0) {
-            settings.presetPins[currentScope] = id;
+            const pins = getPinnedIds(currentScope);
+            settings.presetPins[currentScope] = pins.includes(id) ? pins.filter((pinId) => pinId !== id) : [...pins, id];
             saveSettingsDebounced();
             renderPresetSelect();
+        } else if (act === "del" && index >= 0) {
+            deletePresetById(id);
         } else if ((act === "up" || act === "down") && index >= 0) {
             const swapWith = index + (act === "up" ? -1 : 1);
 
@@ -1789,7 +2010,6 @@ function setupCompactUIEventListeners() {
         }
     });
 
-    // 팝업의 다른 곳을 누르면 목록을 닫는다
     compactUIPopup.on("click", (e) => {
         if (presetListOpen && !$(e.target).closest(".dm-compact--preset-list, .dm-compact--preset-current").length) {
             setPresetListOpen(false);
@@ -1808,6 +2028,8 @@ function setupCompactUIEventListeners() {
         const preset = { id: generatePresetId(), name: name.trim(), content: textareaValue };
         getPresetList(placeholder.key, currentScope).push(preset);
         setSelectedPresetId(currentScope, preset.id);
+        setPresetOn(currentScope, preset.id, true);
+        commitDirectionContentNow(placeholder);
         saveSettingsDebounced();
         renderPresetSelect();
     }
@@ -1857,29 +2079,45 @@ function setupCompactUIEventListeners() {
         renderPresetSelect();
     });
 
-    compactUIPopup.find(".dm-compact--preset-delete").on("click", async () => {
+    async function deletePresetById(presetId) {
         const placeholder = getPopupCurrentPlaceholder();
-        const settings = getSettings();
-        const list = getPresetList(placeholder.key, currentScope);
-        const index = list.findIndex((item) => item.id === getSelectedPresetId(currentScope));
+        const scope = currentScope;
+        const list = getPresetList(placeholder.key, scope);
+        const index = list.findIndex((item) => item.id === presetId);
 
         if (index < 0) return;
 
         const target = list[index];
+        const confirmed = await showNativeConfirm("프리셋 삭제", `"${target.name}" 프리셋을 삭제하시겠습니까? (이 프리셋을 쓰던 모든 채팅방에서도 이 프리셋의 내용이 함께 사라져요)`);
 
-        if (settings.presetPins[currentScope] === target.id) {
-            toastr.warning("기본(★)으로 지정된 프리셋은 삭제할 수 없어요. 다른 프리셋에 ★를 켠 뒤 삭제해 주세요.");
-            return;
+        if (!confirmed || !compactUIPopup || scope !== currentScope) return;
+
+        const at = list.findIndex((item) => item.id === presetId);
+        if (at < 0) return;
+
+        const deletedContent = list[at].content;
+        const textarea = getScopeTextarea(scope);
+        const before = String(textarea.val() || "");
+
+        list.splice(at, 1);
+        purgeDeletedPreset(scope, presetId, deletedContent);
+
+        const state = getCurrentScopeState(placeholder.key);
+
+        if (state.content !== before) {
+            textarea.val(state.content);
+            sessionSnapshot = null;
+            beginHistorySession(state);
         }
 
-        const confirmed = await showNativeConfirm("프리셋 삭제", `"${target.name}" 프리셋을 삭제하시겠습니까? (이 프리셋을 쓰던 채팅방의 내용은 그대로 남아요)`);
-
-        if (!confirmed) return;
-
-        list.splice(index, 1);
-        clearPresetReferences(currentScope, target.id);
+        commitDirectionContentNow(placeholder);
         saveSettingsDebounced();
         renderPresetSelect();
+    }
+
+    compactUIPopup.find(".dm-compact--preset-delete").on("click", () => {
+        const selectedId = getSelectedPresetId(currentScope);
+        if (selectedId) deletePresetById(selectedId);
     });
 
     $(document).on("click.compactUI", (e) => {
@@ -1887,7 +2125,7 @@ function setupCompactUIEventListeners() {
             return;
         }
 
-        // 이미 화면에서 사라진 요소(다시 그려진 목록 줄 등)를 누른 경우는 바깥 클릭이 아니다
+        // 다시 그려져 사라진 요소를 누른 경우는 바깥 클릭이 아니다
         if (!e.target.isConnected) {
             return;
         }
@@ -2017,7 +2255,7 @@ async function clearCurrentCharScopeData() {
 }
 
 async function clearAllScopeData() {
-    const first = await showNativeConfirm("모든 채팅방 데이터 삭제", "모든 채팅방의 전역·캐릭터·줄거리·채팅 칸 내용을 전부 삭제합니다. 프리셋과 프롬프트·Depth 설정은 그대로예요. 되돌릴 수 없어요. 계속할까요?");
+    const first = await showNativeConfirm("모든 채팅방 데이터 삭제", "모든 채팅방의 규칙·AU·캐릭터·줄거리·채팅 칸 내용을 전부 삭제합니다. 프리셋과 프롬프트·Depth 설정은 그대로예요. 되돌릴 수 없어요. 계속할까요?");
 
     if (!first) {
         return;
@@ -2032,8 +2270,12 @@ async function clearAllScopeData() {
     const settings = getSettings();
     const enabled = Boolean(settings.global?.direction?.enabled);
 
+    const auEnabled = Boolean(settings.au?.direction?.enabled);
+
     settings.global = sanitizeScopeState({ direction: { enabled, entries: [""], activeIndex: 0 } });
     settings.globals = {};
+    settings.au = sanitizeScopeState({ direction: { enabled: auEnabled, entries: [""], activeIndex: 0 } });
+    settings.aus = {};
     settings.chars = {};
     settings.chats = {};
     Object.values(PLOT_STORE).forEach((storeKey) => {
@@ -2054,13 +2296,33 @@ async function clearCurrentGlobalScopeData() {
         return;
     }
 
-    const confirmed = await showNativeConfirm("전역 데이터 삭제", "이 채팅방의 전역 칸을 처음 상태(기본 프리셋)로 되돌리시겠습니까? (프리셋은 지워지지 않아요)");
+    const confirmed = await showNativeConfirm("규칙 데이터 삭제", "이 채팅방의 규칙 칸을 처음 상태(★ 프리셋만 켜진 상태)로 되돌리시겠습니까? (프리셋은 지워지지 않아요)");
 
     if (!confirmed) {
         return;
     }
 
     delete getSettings().globals[key];
+    applyAllPlaceholders();
+    saveSettingsDebounced();
+    refreshPopupIfOpened();
+}
+
+async function clearCurrentAuScopeData() {
+    const key = getCurrentChatKey();
+
+    if (!key) {
+        toastr.warning("현재 채팅을 찾을 수 없습니다.");
+        return;
+    }
+
+    const confirmed = await showNativeConfirm("AU 데이터 삭제", "이 채팅방의 AU 칸을 처음 상태(★ 프리셋만 켜진 상태)로 되돌리시겠습니까? (프리셋은 지워지지 않아요)");
+
+    if (!confirmed) {
+        return;
+    }
+
+    delete getSettings().aus[key];
     applyAllPlaceholders();
     saveSettingsDebounced();
     refreshPopupIfOpened();
@@ -2145,7 +2407,6 @@ function setupExtensionMenuEventHandlers() {
         updateExtensionMenuUI();
     });
 
-    // 프롬프트는 저장 버튼을 눌러야 반영된다. 고치는 중에는 초안으로만 들고 있고, 저장 버튼에 불이 켜진다.
     $("#direction_prompt_text").on("input", function () {
         const value = String($(this).val() ?? "");
 
@@ -2205,6 +2466,7 @@ function setupExtensionMenuEventHandlers() {
     });
 
     $("#direction_clear_global").on("click", clearCurrentGlobalScopeData);
+    $("#direction_clear_au").on("click", clearCurrentAuScopeData);
     $("#direction_clear_all").on("click", clearAllScopeData);
     $("#direction_clear_char").on("click", clearCurrentCharScopeData);
     $("#direction_clear_chat").on("click", clearCurrentChatScopeData);
@@ -2233,7 +2495,7 @@ function injectDirectionPrompt(eventData) {
     const injections = [];
 
     SCOPE_ORDER.forEach((scope) => {
-        const value = getScopedPlaceholder(scope, "direction");
+        const value = getInjectionPlaceholder(scope, "direction");
 
         if (!isValidEnabledContent(value)) {
             return;
@@ -2260,8 +2522,7 @@ function injectDirectionPrompt(eventData) {
         return;
     }
 
-    // 모든 Depth를 "원래 메시지 기준"으로 정확히 맞추기 위해, 깊은 것(앞쪽)부터 삽입한다.
-    // (이미 끼워 넣은 개수만큼 인덱스가 밀리는 것을 보정) 같은 Depth끼리는 SCOPE_ORDER 순서를 유지한다.
+    // 깊은 것(앞쪽)부터 삽입하고, 이미 끼운 개수만큼 인덱스를 보정한다
     const originalLength = messages.length;
     let inserted = 0;
 
