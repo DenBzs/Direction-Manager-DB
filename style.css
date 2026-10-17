@@ -441,7 +441,7 @@
 .dm-compact--preset-list {
     display: none;
     position: static;
-    max-height: min(260px, 40vh);
+    max-height: min(150px, 40vh);
     overflow-y: auto;
     overscroll-behavior: contain;
     -webkit-overflow-scrolling: touch;
