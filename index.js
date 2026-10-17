@@ -1514,6 +1514,7 @@ function renderPresetList() {
 
     const list = compactUIPopup.find(".dm-compact--preset-list");
     const scrollTop = list.scrollTop();
+    list.css({ "max-height": "min(150px, 40vh)", "overflow-y": "auto" });
     list.html(buildPresetListHtml()).scrollTop(scrollTop);
 }
 
@@ -1815,13 +1816,38 @@ function setupCompactUIEventListeners() {
     }
 
     // 프리셋 영역을 눌러도 입력칸 포커스를 빼앗지 않게 해서 키보드가 접히지 않도록 한다
-    compactUIPopup.on(
-        "mousedown",
-        ".dm-compact--preset-current, .dm-compact--preset-list, .dm-compact--preset-save, .dm-compact--preset-new, .dm-compact--preset-rename, .dm-compact--preset-delete",
-        (e) => {
-            e.preventDefault();
+    const PRESET_FOCUS_SAFE_SELECTOR = ".dm-compact--preset-current, .dm-compact--preset-list, .dm-compact--preset-save, .dm-compact--preset-new, .dm-compact--preset-rename, .dm-compact--preset-delete";
+    let presetTapStart = null;
+
+    compactUIPopup.on("mousedown", PRESET_FOCUS_SAFE_SELECTOR, (e) => {
+        e.preventDefault();
+    });
+
+    // 터치: 스크롤이 아니라 '톡' 눌렀을 때만 직접 클릭을 보내고, 브라우저 기본 동작(포커스 이동)은 막는다
+    compactUIPopup.on("touchstart", PRESET_FOCUS_SAFE_SELECTOR, (e) => {
+        const touch = e.originalEvent.touches[0];
+        presetTapStart = touch ? { x: touch.clientX, y: touch.clientY, moved: false } : null;
+    });
+
+    compactUIPopup.on("touchmove", PRESET_FOCUS_SAFE_SELECTOR, (e) => {
+        const touch = e.originalEvent.touches[0];
+        if (!presetTapStart || !touch) return;
+        if (Math.abs(touch.clientX - presetTapStart.x) > 8 || Math.abs(touch.clientY - presetTapStart.y) > 8) {
+            presetTapStart.moved = true;
         }
-    );
+    });
+
+    compactUIPopup.on("touchend", PRESET_FOCUS_SAFE_SELECTOR, (e) => {
+        const start = presetTapStart;
+        presetTapStart = null;
+
+        if (!start || start.moved) return;
+        if (!$(document.activeElement).is("textarea")) return;
+        if ($(e.target).closest("button").prop("disabled")) return;
+
+        e.preventDefault();
+        $(e.target).trigger("click");
+    });
 
     bindTapAction(".dm-compact--scope-btn", function () {
         const nextTab = String($(this).data("tab"));
