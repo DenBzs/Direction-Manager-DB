@@ -149,10 +149,10 @@ function isPresetScope(scope) {
 const PLOT_STORE = { plotMain: "plotMains", plotNext: "plotNexts" };
 
 const SCOPE_PLACEHOLDERS = {
-    default: "Direction 내용을 입력하세요...",
-    au: "AU 설정을 적으세요 (예: 오메가버스의 규칙과 설정)",
-    plotMain: "전체 방향·결말을 적으세요 (모델이 배경으로만 참고해요)",
-    plotNext: "앞으로 몇 챗 분량의 사건을 순서대로 적으세요 (구체적일수록 속도가 잘 맞아요)",
+    default: "",
+    au: "",
+    plotMain: "",
+    plotNext: "",
 };
 
 let lastPlotScope = "plotNext";
@@ -1737,9 +1737,9 @@ function showCompactUIPopup() {
 
             <div class="dm-compact--content">
                 <div class="dm-compact--plot-label dm-compact--plot-only" data-scope="plotMain">📖 큰 줄거리<small>방향·결말</small></div>
-                <textarea class="dm-compact--textarea dm-compact--textarea-main" placeholder="Direction 내용을 입력하세요..."></textarea>
-                <div class="dm-compact--plot-label dm-compact--plot-only" data-scope="plotNext">🎬 작은 줄거리<small>몇 챗 분량 사건</small></div>
-                <textarea class="dm-compact--textarea dm-compact--textarea-next dm-compact--plot-only" placeholder="Direction 내용을 입력하세요..."></textarea>
+                <textarea class="dm-compact--textarea dm-compact--textarea-main" placeholder=""></textarea>
+                <div class="dm-compact--plot-label dm-compact--plot-only" data-scope="plotNext">🎬 작은 줄거리<small>가까운 전개</small></div>
+                <textarea class="dm-compact--textarea dm-compact--textarea-next dm-compact--plot-only" placeholder=""></textarea>
             </div>
         </div>
     `;
