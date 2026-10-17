@@ -1814,6 +1814,15 @@ function setupCompactUIEventListeners() {
         });
     }
 
+    // 프리셋 영역을 눌러도 입력칸 포커스를 빼앗지 않게 해서 키보드가 접히지 않도록 한다
+    compactUIPopup.on(
+        "mousedown",
+        ".dm-compact--preset-current, .dm-compact--preset-list, .dm-compact--preset-save, .dm-compact--preset-new, .dm-compact--preset-rename, .dm-compact--preset-delete",
+        (e) => {
+            e.preventDefault();
+        }
+    );
+
     bindTapAction(".dm-compact--scope-btn", function () {
         const nextTab = String($(this).data("tab"));
         const nextScope = nextTab === "plot" ? lastPlotScope : TAB_SCOPES[nextTab][0];
