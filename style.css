@@ -163,9 +163,40 @@
     align-items: center;
     justify-content: center;
     gap: 3px;
-    flex: 1 1 auto;
+    flex: 1 1 0;
     min-width: 0;
+    overflow: hidden;
     white-space: nowrap;
+    user-select: none;
+    -webkit-user-select: none;
+    -webkit-touch-callout: none;
+}
+
+/* 채팅탭: 꾹 눌러 user 전송 모드로 바뀔 때 휘릭 뒤집히는 효과 */
+.dm-compact--scope-btn[data-tab="chat"] {
+    transition: transform 130ms ease;
+}
+
+.dm-compact--scope-btn.dm-compact--flip-out {
+    transform: perspective(200px) rotateY(90deg);
+}
+
+.dm-compact--scope-btn--user .dm-compact--scope-emoji {
+    filter: none;
+    opacity: 1;
+}
+
+/* user 전송 모드: 전개지시용 컨트롤은 안 보이게만 하고 자리는 그대로 둬서 다른 탭과 헤더 크기를 똑같이 맞춘다 */
+.dm-compact--popup.dm-compact--user-mode .dm-compact--radio,
+.dm-compact--popup.dm-compact--user-mode .dm-compact--history-btn,
+.dm-compact--popup.dm-compact--user-mode .dm-compact--history-count {
+    visibility: hidden;
+    pointer-events: none;
+}
+
+.dm-compact--popup.dm-compact--user-mode .dm-compact--textarea {
+    border-color: var(--SmartThemeQuoteColor);
+    resize: none;
 }
 
 .dm-compact--scope-btn--active {
@@ -296,7 +327,7 @@
 
 @media (max-width: 950px) {
     .dm-compact--popup {
-        width: 380px;
+        width: 400px;
     }
 
     .dm-compact--scope-row,
@@ -307,7 +338,7 @@
 
 @media (max-width: 480px) {
     .dm-compact--popup {
-        width: 320px;
+        width: 340px;
     }
 
     .dm-compact--header {
@@ -441,7 +472,7 @@
 .dm-compact--preset-list {
     display: none;
     position: static;
-    max-height: min(150px, 40vh);
+    max-height: min(260px, 40vh);
     overflow-y: auto;
     overscroll-behavior: contain;
     -webkit-overflow-scrolling: touch;
