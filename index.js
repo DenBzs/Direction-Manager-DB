@@ -148,13 +148,6 @@ function isPresetScope(scope) {
 
 const PLOT_STORE = { plotMain: "plotMains", plotNext: "plotNexts" };
 
-const SCOPE_PLACEHOLDERS = {
-    default: "",
-    au: "",
-    plotMain: "",
-    plotNext: "",
-};
-
 let lastPlotScope = "plotNext";
 
 function scopeToTab(scope) {
@@ -200,6 +193,7 @@ const defaultSettings = {
     directionPrompt: { ...DEFAULT_DIRECTION_PROMPTS },
     promptDepth: { ...DEFAULT_PROMPT_DEPTHS },
     lastScope: "chat",
+    userSendMode: false,
     _migratedV2: false,
     _migratedV3: false,
     _migratedV4: false,
@@ -276,7 +270,8 @@ function restoreTextareaHeightForCurrentScope() {
         return;
     }
 
-    if (usesFreeSize(currentScope) && !chatHeightIsCustom) {
+    // user 전송 탭은 크기 조절을 막고 항상 다른 탭과 같은 높이로 맞춘다
+    if (isUserView() || (usesFreeSize(currentScope) && !chatHeightIsCustom)) {
         textarea[0].style.height = `${Math.round(sharedPx + cachedPresetRowHeight)}px`;
         return;
     }
@@ -379,6 +374,16 @@ function navigateHistory(direction) {
     updateAppliedIndicator();
     refreshPresetControls();
 }
+// ── 채팅탭 길게 누르기: user 전송 모드 ──
+// 채팅탭을 꾹 누르면 팝업 입력칸이 "user로 보낼 메시지" 입력칸으로 바뀐다.
+// 입력한 내용은 실제 채팅 입력칸(#send_textarea)에 그대로 들어가고, 전송은 원래 있던 보내기 버튼으로 한다.
+const USER_SEND_LONG_PRESS_MS = 500;
+const CHAT_TAB_HTML = '<span class="dm-compact--scope-emoji">🗨️</span>채팅';
+const USER_TAB_HTML = '<span class="dm-compact--scope-emoji">✨</span>user';
+const USER_SEND_TITLE = "✨user로 전송";
+// 채팅탭 자리를 user 전송 탭으로 바꿔 둔 상태인지. 꾹 눌러서 바꾸고, 다시 꾹 누를 때까지 유지된다(설정에 저장).
+let userSendMode = false;
+
 let isNativePopupOpen = false;
 let compactUIApplyDebounceTimer = null;
 let promptEditorScope = "global";
@@ -423,31 +428,11 @@ function sanitizePlaceholderValue(value) {
     let activeIndex = Number.isInteger(value?.activeIndex) ? value.activeIndex : entries.length - 1;
     activeIndex = Math.min(Math.max(activeIndex, 0), entries.length - 1);
 
-    const byPreset = {};
-
-    if (value?.byPreset && typeof value.byPreset === "object") {
-        Object.keys(value.byPreset).forEach((id) => {
-            const saved = value.byPreset[id];
-            if (!saved || !Array.isArray(saved.entries)) return;
-
-            const savedEntries = saved.entries.filter((item) => typeof item === "string");
-            if (!savedEntries.length) return;
-
-            capEntries(savedEntries);
-            const savedIndex = Number.isInteger(saved.activeIndex) ? saved.activeIndex : savedEntries.length - 1;
-            byPreset[id] = {
-                entries: savedEntries,
-                activeIndex: Math.min(Math.max(savedIndex, 0), savedEntries.length - 1),
-            };
-        });
-    }
-
     return {
         enabled: Boolean(value?.enabled),
         entries,
         activeIndex,
         content: entries[activeIndex],
-        byPreset,
     };
 }
 
@@ -665,6 +650,7 @@ function normalizeSettings() {
     settings.directionPrompt = normalizeDirectionPromptObject(settings.directionPrompt);
     settings.promptDepth = normalizePromptDepth(settings.promptDepth);
     settings.lastScope = SCOPE_ORDER.includes(settings.lastScope) ? settings.lastScope : "chat";
+    settings.userSendMode = Boolean(settings.userSendMode);
     settings._migratedV2 = Boolean(settings._migratedV2);
     settings._migratedV3 = Boolean(settings._migratedV3);
     settings._migratedV4 = Boolean(settings._migratedV4);
@@ -973,6 +959,7 @@ async function loadSettings() {
     const migratedV6 = migrateV6PlotScopesIfNeeded();
     const pruned = pruneRemovedPlaceholders();
     normalizeSettings();
+    userSendMode = Boolean(getSettings().userSendMode);
     const migratedV7 = migrateV7DefaultPresetIfNeeded();
     const migratedV8 = migrateV8DepthDefaultsIfNeeded();
     const migratedV9 = migrateV9AuScopeIfNeeded();
@@ -1433,14 +1420,9 @@ function purgeDeletedPreset(scope, presetId, deletedContent) {
         const content = typeof entry.direction?.content === "string" ? entry.direction.content : "";
         const wasOpen = entry.presetId === presetId || (!entry.presetId && hasContent && content === deletedContent);
 
-        const keptHistory = { ...(entry.direction?.byPreset || {}) };
-        delete keptHistory[presetId];
-
         if (wasOpen) {
             entry.presetId = fallbackId;
-            entry.direction = sanitizePlaceholderValue({ ...freshDirection(), byPreset: keptHistory });
-        } else if (entry.direction && typeof entry.direction === "object") {
-            entry.direction.byPreset = keptHistory;
+            entry.direction = freshDirection();
         }
 
         if (Array.isArray(entry.onIds)) entry.onIds = entry.onIds.filter((id) => id !== presetId);
@@ -1514,7 +1496,6 @@ function renderPresetList() {
 
     const list = compactUIPopup.find(".dm-compact--preset-list");
     const scrollTop = list.scrollTop();
-    list.css({ "max-height": "min(150px, 40vh)", "overflow-y": "auto" });
     list.html(buildPresetListHtml()).scrollTop(scrollTop);
 }
 
@@ -1554,7 +1535,7 @@ function updateAppliedIndicator() {
     const activeScopes = new Set(combined.activeScopes);
 
     TAB_ORDER.forEach((tab) => {
-        const isOn = TAB_SCOPES[tab].some((scope) => activeScopes.has(scope));
+        const isOn = !(tab === "chat" && userSendMode) && TAB_SCOPES[tab].some((scope) => activeScopes.has(scope));
         compactUIPopup
             .find(`.dm-compact--scope-btn[data-tab="${tab}"]`)
             .toggleClass("dm-compact--scope-btn--on", isOn);
@@ -1617,12 +1598,25 @@ function syncPopupByCurrentState() {
         compactUIPopup
             .find(`.dm-compact--textarea-${slot}`)
             .attr("data-scope", scope)
-            .attr("placeholder", SCOPE_PLACEHOLDERS[scope] || SCOPE_PLACEHOLDERS.default)
             .val(state.content || "")
             .prop("disabled", !settings.enabled);
     });
 
     compactUIPopup.toggleClass("dm-compact--hide-preset", scopeHidesPresets(currentScope));
+
+    updateChatTabLabel();
+
+    const userView = isUserView();
+    compactUIPopup.toggleClass("dm-compact--user-mode", userView);
+    compactUIPopup.find(".dm-compact--title").text(userView ? USER_SEND_TITLE : "🪄전개지시M");
+
+    if (userView) {
+        compactUIPopup
+            .find(".dm-compact--textarea-main")
+            .attr("data-scope", "")
+            .val(getSendInput())
+            .prop("disabled", false);
+    }
 
     refreshScopeButtons();
     renderPresetSelect();
@@ -1665,6 +1659,106 @@ function escapeHtml(value) {
         .replace(/>/g, "&gt;")
         .replace(/"/g, "&quot;")
         .replace(/'/g, "&#39;");
+}
+
+// 지금 화면이 user 전송 입력칸인지 (user 전송 탭 자리가 켜져 있고, 그 탭을 보고 있을 때)
+function isUserView() {
+    return userSendMode && scopeToTab(currentScope) === "chat";
+}
+
+function setUserSendMode(value) {
+    userSendMode = Boolean(value);
+    getSettings().userSendMode = userSendMode;
+    saveSettingsDebounced();
+}
+
+// 숨겨 둔 채팅 입력칸(#send_textarea)에 값을 넣는다.
+// input 이벤트는 일부러 보내지 않는다: 자동 높이 조절이 돌면 폭 0인 입력칸이 글자 수만큼 길어져 하단 입력줄이 늘어난다.
+function setSendInput(value) {
+    $("#send_textarea").val(value);
+}
+
+function getSendInput() {
+    return String($("#send_textarea").val() ?? "");
+}
+
+function applyChatTabLabel(btn, toUser) {
+    btn.attr("data-mode", toUser ? "user" : "chat")
+        .html(toUser ? USER_TAB_HTML : CHAT_TAB_HTML)
+        .toggleClass("dm-compact--scope-btn--user", toUser);
+}
+
+// 탭 라벨을 애니메이션 없이 현재 모드에 맞춘다 (팝업을 열 때 등)
+function updateChatTabLabel() {
+    if (!compactUIPopup) return;
+
+    const btn = compactUIPopup.find('.dm-compact--scope-btn[data-tab="chat"]');
+
+    if (!btn.length || btn.attr("data-mode") === (userSendMode ? "user" : "chat")) return;
+
+    applyChatTabLabel(btn, userSendMode);
+}
+
+// 꾹 눌러 모드가 바뀔 때 버튼이 휘릭 뒤집히며 라벨이 바뀐다
+function flipChatTab(toUser) {
+    if (!compactUIPopup) return;
+
+    const btn = compactUIPopup.find('.dm-compact--scope-btn[data-tab="chat"]');
+
+    if (!btn.length) return;
+
+    btn.attr("data-mode", toUser ? "user" : "chat").addClass("dm-compact--flip-out");
+
+    setTimeout(() => {
+        applyChatTabLabel(btn, toUser);
+        btn.removeClass("dm-compact--flip-out");
+    }, 130);
+}
+
+// 채팅탭 꾹 누르기: 채팅탭 자리를 user 전송 탭 ↔ 원래 채팅탭으로 바꾼다. 다시 꾹 누르기 전까지 유지된다.
+function toggleUserSendMode() {
+    if (!compactUIPopup) return;
+
+    setUserSendMode(!userSendMode);
+    flipChatTab(userSendMode);
+    switchToTab("chat");
+
+    if (isUserView()) {
+        compactUIPopup.find(".dm-compact--textarea-main").trigger("focus");
+    }
+}
+
+// 탭 전환 (탭 버튼 짧게 누르기)
+function switchToTab(nextTab) {
+    const nextScope = nextTab === "plot" ? lastPlotScope : TAB_SCOPES[nextTab][0];
+    const availability = getScopeAvailability(nextScope);
+
+    if (!availability.available) {
+        return;
+    }
+
+    flushHistorySession();
+
+    const outgoingGroup = textareaHeightGroup(currentScope);
+
+    if (outgoingGroup !== "plot") {
+        const outgoingTextarea = getScopeTextarea(currentScope);
+        compactUITextareaHeights[outgoingGroup] = outgoingTextarea.length ? outgoingTextarea[0].style.height : "";
+    }
+
+    currentScope = nextScope;
+    getSettings().lastScope = nextScope;
+    saveSettingsDebounced();
+    syncPopupByCurrentState();
+
+    restoreTextareaHeightForCurrentScope();
+}
+
+// user 메시지가 실제로 전송되면 팝업을 닫는다 (입력칸 내용은 SillyTavern이 비운다)
+function handleMessageSent() {
+    if (!isUserView() || !compactUIPopup) return;
+
+    closeCompactUIPopup();
 }
 
 function closeCompactUIPopup() {
@@ -1736,7 +1830,7 @@ function showCompactUIPopup() {
                 <button class="dm-compact--scope-btn" data-tab="au" type="button"><span class="dm-compact--scope-emoji">🌐</span>AU</button>
                 <button class="dm-compact--scope-btn" data-tab="char" type="button"><span class="dm-compact--scope-emoji">🎭</span>캐릭터</button>
                 <button class="dm-compact--scope-btn" data-tab="plot" type="button"><span class="dm-compact--scope-emoji">📖</span>줄거리</button>
-                <button class="dm-compact--scope-btn" data-tab="chat" type="button"><span class="dm-compact--scope-emoji">🗨️</span>채팅</button>
+                <button class="dm-compact--scope-btn" data-tab="chat" type="button" title="꾹 누르면 user로 전송 모드">${CHAT_TAB_HTML}</button>
             </div>
 
             <div class="dm-compact--preset-row">
@@ -1762,10 +1856,10 @@ function showCompactUIPopup() {
             </div>
 
             <div class="dm-compact--content">
-                <div class="dm-compact--plot-label dm-compact--plot-only" data-scope="plotMain">📖 큰 줄거리<small>방향·결말</small></div>
-                <textarea class="dm-compact--textarea dm-compact--textarea-main" placeholder=""></textarea>
-                <div class="dm-compact--plot-label dm-compact--plot-only" data-scope="plotNext">🎬 작은 줄거리<small>가까운 전개</small></div>
-                <textarea class="dm-compact--textarea dm-compact--textarea-next dm-compact--plot-only" placeholder=""></textarea>
+                <div class="dm-compact--plot-label dm-compact--plot-only" data-scope="plotMain">📖 큰 줄거리</div>
+                <textarea class="dm-compact--textarea dm-compact--textarea-main"></textarea>
+                <div class="dm-compact--plot-label dm-compact--plot-only" data-scope="plotNext">🎬 작은 줄거리</div>
+                <textarea class="dm-compact--textarea dm-compact--textarea-next dm-compact--plot-only"></textarea>
             </div>
         </div>
     `;
@@ -1815,65 +1909,59 @@ function setupCompactUIEventListeners() {
         });
     }
 
-    // 프리셋 영역을 눌러도 입력칸 포커스를 빼앗지 않게 해서 키보드가 접히지 않도록 한다
-    const PRESET_FOCUS_SAFE_SELECTOR = ".dm-compact--preset-current, .dm-compact--preset-list, .dm-compact--preset-save, .dm-compact--preset-new, .dm-compact--preset-rename, .dm-compact--preset-delete";
-    let presetTapStart = null;
-
-    compactUIPopup.on("mousedown", PRESET_FOCUS_SAFE_SELECTOR, (e) => {
-        e.preventDefault();
+    bindTapAction('.dm-compact--scope-btn:not([data-tab="chat"])', function () {
+        switchToTab(String($(this).data("tab")));
     });
 
-    // 터치: 스크롤이 아니라 '톡' 눌렀을 때만 직접 클릭을 보내고, 브라우저 기본 동작(포커스 이동)은 막는다
-    compactUIPopup.on("touchstart", PRESET_FOCUS_SAFE_SELECTOR, (e) => {
-        const touch = e.originalEvent.touches[0];
-        presetTapStart = touch ? { x: touch.clientX, y: touch.clientY, moved: false } : null;
-    });
+    // 채팅탭: 짧게 누르면 채팅 탭으로, 꾹 누르면 user 전송 모드로 (이미 모드 안이면 원래대로)
+    (function bindChatTabLongPress() {
+        const chatTabSelector = '.dm-compact--scope-btn[data-tab="chat"]';
+        let pressTimer = null;
 
-    compactUIPopup.on("touchmove", PRESET_FOCUS_SAFE_SELECTOR, (e) => {
-        const touch = e.originalEvent.touches[0];
-        if (!presetTapStart || !touch) return;
-        if (Math.abs(touch.clientX - presetTapStart.x) > 8 || Math.abs(touch.clientY - presetTapStart.y) > 8) {
-            presetTapStart.moved = true;
-        }
-    });
+        const cancelPress = () => {
+            clearTimeout(pressTimer);
+            pressTimer = null;
+        };
 
-    compactUIPopup.on("touchend", PRESET_FOCUS_SAFE_SELECTOR, (e) => {
-        const start = presetTapStart;
-        presetTapStart = null;
+        const pressStart = (el) => {
+            if ($(el).prop("disabled")) return;
 
-        if (!start || start.moved) return;
-        if (!$(document.activeElement).is("textarea")) return;
-        if ($(e.target).closest("button").prop("disabled")) return;
+            cancelPress();
+            pressTimer = setTimeout(() => {
+                pressTimer = null;
 
-        e.preventDefault();
-        $(e.target).trigger("click");
-    });
+                toggleUserSendMode();
+            }, USER_SEND_LONG_PRESS_MS);
+        };
 
-    bindTapAction(".dm-compact--scope-btn", function () {
-        const nextTab = String($(this).data("tab"));
-        const nextScope = nextTab === "plot" ? lastPlotScope : TAB_SCOPES[nextTab][0];
-        const availability = getScopeAvailability(nextScope);
+        // 타이머가 남아 있으면 꾹 누르기 전에 뗀 것 = 짧은 탭
+        const pressEnd = () => {
+            if (pressTimer === null) return;
 
-        if (!availability.available) {
-            return;
-        }
+            cancelPress();
+            switchToTab("chat");
+        };
 
-        flushHistorySession();
+        // 터치: 키보드가 닫히지 않게 touchstart/touchend에서 기본 동작을 막는다 (텍스트 선택·메뉴도 같이 막힘)
+        compactUIPopup.on("touchstart", chatTabSelector, function (e) {
+            e.preventDefault();
+            pressStart(this);
+        });
+        compactUIPopup.on("touchend", chatTabSelector, function (e) {
+            e.preventDefault();
+            pressEnd();
+        });
+        compactUIPopup.on("touchcancel", chatTabSelector, cancelPress);
 
-        const outgoingGroup = textareaHeightGroup(currentScope);
-
-        if (outgoingGroup !== "plot") {
-            const outgoingTextarea = getScopeTextarea(currentScope);
-            compactUITextareaHeights[outgoingGroup] = outgoingTextarea.length ? outgoingTextarea[0].style.height : "";
-        }
-
-        currentScope = nextScope;
-        getSettings().lastScope = nextScope;
-        saveSettingsDebounced();
-        syncPopupByCurrentState();
-
-        restoreTextareaHeightForCurrentScope();
-    });
+        // 마우스
+        compactUIPopup.on("mousedown", chatTabSelector, function (e) {
+            e.preventDefault();
+            pressStart(this);
+        });
+        compactUIPopup.on("mouseup", chatTabSelector, pressEnd);
+        compactUIPopup.on("mouseleave", chatTabSelector, cancelPress);
+        compactUIPopup.on("contextmenu", chatTabSelector, (e) => e.preventDefault());
+    })();
 
     bindTapAction(".dm-compact--history-prev", () => navigateHistory(-1));
     bindTapAction(".dm-compact--history-next", () => navigateHistory(1));
@@ -1922,7 +2010,7 @@ function setupCompactUIEventListeners() {
     });
 
     compactUIPopup.on("mousedown touchstart", ".dm-compact--textarea", function (e) {
-        if (!usesFreeSize(currentScope) || chatHeightIsCustom) {
+        if (isUserView() || !usesFreeSize(currentScope) || chatHeightIsCustom) {
             resizeCandidateHeight = null;
             return;
         }
@@ -1947,6 +2035,12 @@ function setupCompactUIEventListeners() {
     });
 
     bindTapAction(".dm-compact--clear", function () {
+        if (isUserView()) {
+            getScopeTextarea(currentScope).val("");
+            setSendInput("");
+            return;
+        }
+
         const currentPlaceholder = getPopupCurrentPlaceholder();
         const scopedValue = getCurrentScopeState(currentPlaceholder.key);
 
@@ -1977,6 +2071,12 @@ function setupCompactUIEventListeners() {
     });
 
     compactUIPopup.find(".dm-compact--textarea").on("input", function () {
+        // user 전송 탭: 전개지시에는 저장하지 않고, 채팅 입력칸에만 그대로 옮긴다
+        if (isUserView()) {
+            setSendInput(String($(this).val()));
+            return;
+        }
+
         const fieldScope = $(this).attr("data-scope");
 
         if (fieldScope && fieldScope !== currentScope) {
@@ -2016,29 +2116,8 @@ function setupCompactUIEventListeners() {
     function selectPreset(preset) {
         const placeholder = getPopupCurrentPlaceholder();
 
-        // 프리셋마다 ← → 기록을 따로 쓴다: 떠나는 프리셋 기록은 보관하고, 들어가는 프리셋 기록을 꺼낸다
-        flushHistorySession();
-        const prevId = getSelectedPresetId(currentScope) || "";
-        const prevState = getCurrentScopeState(placeholder.key);
-        const byPreset = { ...(prevState.byPreset || {}) };
-        byPreset[prevId || "_none"] = { entries: prevState.entries.slice(), activeIndex: prevState.activeIndex };
-
-        const saved = byPreset[preset.id];
-        const nextEntries = saved ? saved.entries.slice() : [preset.content];
-        if (nextEntries[nextEntries.length - 1] !== preset.content) nextEntries.push(preset.content);
-        capEntries(nextEntries);
-
-        setCurrentScopeState(placeholder.key, {
-            enabled: prevState.enabled,
-            entries: nextEntries,
-            activeIndex: nextEntries.length - 1,
-            byPreset,
-        });
-        sessionSnapshot = null;
-
         setSelectedPresetId(currentScope, preset.id);
         getScopeTextarea(currentScope).val(preset.content).trigger("input");
-        beginHistorySession(getCurrentScopeState(placeholder.key));
         commitDirectionContentNow(placeholder);
         saveSettingsDebounced();
         setPresetListOpen(false);
@@ -2208,6 +2287,11 @@ function setupCompactUIEventListeners() {
 
         // 다시 그려져 사라진 요소를 누른 경우는 바깥 클릭이 아니다
         if (!e.target.isConnected) {
+            return;
+        }
+
+        // user 전송 모드에서는 하단 입력줄(보내기 버튼 등)을 눌러도 닫지 않는다. 전송되면 handleMessageSent가 닫는다
+        if (isUserView() && $(e.target).closest("#send_form").length) {
             return;
         }
 
@@ -2626,6 +2710,10 @@ jQuery(async () => {
 
     eventSource.on(event_types.CHAT_COMPLETION_PROMPT_READY, injectDirectionPrompt);
     eventSource.on(event_types.CHAT_CHANGED, handleContextChanged);
+
+    if (event_types.MESSAGE_SENT) {
+        eventSource.on(event_types.MESSAGE_SENT, handleMessageSent);
+    }
 
     if (event_types.APP_READY) {
         eventSource.on(event_types.APP_READY, handleContextChanged);
